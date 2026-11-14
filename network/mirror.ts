@@ -22,7 +22,8 @@ const MAX_SAMPLES = 8;
  * Snapshots arrive at 10 Hz and with network jitter; drawing them directly
  * would stutter. Instead every position is stamped with its server time and
  * the mirror renders slightly in the past, blending between the two samples
- * that bracket the render time.
+ * that bracket the render time. On a wrapping world the blend takes the short
+ * way round, so a unit crossing the seam does not streak across the map.
  */
 export class EntityMirror {
   readonly entities = new Map<number, MirrorEntity>();
@@ -35,7 +36,7 @@ export class EntityMirror {
   private readonly tickMs: number;
   private readonly snapshotMs: number;
 
-  constructor(tickRate: number, snapshotEvery: number) {
+  constructor(tickRate: number, snapshotEvery: number, private readonly wrapW = 0, private readonly wrapH = 0) {
     this.tickMs = 1000 / tickRate;
     this.snapshotMs = this.tickMs * snapshotEvery;
   }
@@ -84,6 +85,13 @@ export class EntityMirror {
     }
   }
 
+  private lerp(a: number, b: number, k: number, size: number): number {
+    if (size === 0) return a + (b - a) * k;
+    let d = (((b - a) % size) + size) % size;
+    if (d > size / 2) d -= size;
+    return (((a + d * k) % size) + size) % size;
+  }
+
   /** Advance render positions to the interpolation time for this frame. */
   update(nowMs: number, dt: number): void {
     if (this.offset === null) return;
@@ -99,8 +107,8 @@ export class EntityMirror {
         let i = last - 3;
         while (i > 0 && s[i] > rt) i -= 3;
         const k = (rt - s[i]) / (s[i + 3] - s[i]);
-        e.rx = s[i + 1] + (s[i + 4] - s[i + 1]) * k;
-        e.ry = s[i + 2] + (s[i + 5] - s[i + 2]) * k;
+        e.rx = this.lerp(s[i + 1], s[i + 4], k, this.wrapW);
+        e.ry = this.lerp(s[i + 2], s[i + 5], k, this.wrapH);
       }
       // Turn through the short arc.
       let d = (u.facing - e.rfacing) % (Math.PI * 2);

@@ -4,131 +4,114 @@ import { dirname, extname, join, normalize, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { WebSocket, WebSocketServer } from 'ws';
 import { TickLoop } from '../core-ecs/tick';
-import { AOI_RADIUS, Net, SNAPSHOT_EVERY, TICK_RATE, describeEntity, SectorSim } from '../game-sim';
+import { AOI_RADIUS, Char, describeEntity, Inv, Net, SNAPSHOT_EVERY, TICK_RATE, WorldSim } from '../game-sim';
 import { C2S, decodeClient, encodeServer, Replicator, S2C, type ClientMsg, type ReplicationSource, type ServerMsg } from '../network';
 import { SECTOR_COUNT, sectorInfo } from '../world-gen/planet';
-import { CHUNK_SIZE, SECTOR_SIZE } from '../world-gen/sector';
+import { sectorOfTile } from '../world-gen/surface';
 
 /**
  * Authoritative game server.
  *
  * One HTTP listener serves the built web client and upgrades /ws to the binary
- * game socket. All gameplay runs here at a fixed 20 Hz; clients only send
- * orders and receive area-of-interest snapshots.
+ * game socket. The whole planet is one simulation stepped here at a fixed
+ * 20 Hz; clients send inputs and orders and receive area-of-interest snapshots
+ * centred on their character.
  *
- * World state lives in memory for the lifetime of the process: colonies
- * persist across disconnects and keep working while their owner is away, but
- * not across a server restart.
+ * World state lives in memory for the lifetime of the process: characters and
+ * colonies persist across disconnects and followers keep working while their
+ * leader is away, but nothing survives a server restart.
  */
 
 const PORT = Number(process.env.PORT ?? 8080);
 const SEED = Number(process.env.WORLD_SEED ?? 20451) >>> 0;
 const CLIENT_DIR = resolve(dirname(fileURLToPath(import.meta.url)), '../client');
-const CHUNKS_PER_SIDE = SECTOR_SIZE / CHUNK_SIZE;
-/** Per-connection inbound budget; orders beyond it are dropped. */
-const MAX_MSGS_PER_SEC = 80;
+/** Per-connection inbound budget; messages beyond it are dropped. */
+const MAX_MSGS_PER_SEC = 120;
 
 interface Player {
   id: number;
   token: string;
   name: string;
-  /** Sector holding this player's colony, or -1 before the first landing. */
-  home: number;
-  /** Sector currently being viewed on the surface, or -1 while in orbit. */
-  present: number;
+  /** True while the player is viewing the surface rather than orbit. */
+  present: boolean;
   ws: WebSocket | null;
-  viewCx: number;
-  viewCy: number;
   repl: Replicator;
 }
 
 const players = new Map<number, Player>();
 const playersByToken = new Map<string, Player>();
-const sectors = new Map<number, { sim: SectorSim; source: ReplicationSource }>();
+const sim = new WorldSim(SEED);
+const source: ReplicationSource = {
+  grid: sim.grid,
+  get tick() { return sim.tick; },
+  version: (e) => sim.world.get(e, Net)?.version ?? 0,
+  moveTick: (e) => sim.world.get(e, Net)?.moveTick ?? 0,
+  describe: (e) => describeEntity(sim.world, e),
+};
 let nextPlayerId = 1;
-let serverTick = 0;
 
 function send(p: Player, m: ServerMsg): void {
   if (p.ws?.readyState === WebSocket.OPEN) p.ws.send(encodeServer(m));
 }
 
-function getSector(id: number) {
-  let s = sectors.get(id);
-  if (!s) {
-    const sim = new SectorSim(SEED, id, sectorInfo(SEED, id).biome);
-    const source: ReplicationSource = {
-      grid: sim.grid,
-      get tick() { return sim.tick; },
-      version: (e) => sim.world.get(e, Net)?.version ?? 0,
-      moveTick: (e) => sim.world.get(e, Net)?.moveTick ?? 0,
-      describe: (e) => describeEntity(sim.world, e),
-    };
-    s = { sim, source };
-    sectors.set(id, s);
-    console.log('[sector] instantiated ' + sectorInfo(SEED, id).name + ' with ' + sim.world.entityCount + ' entities');
-  }
-  return s;
+function homeSector(p: Player): number {
+  const c = sim.viewCenter(p.id);
+  return c ? sectorOfTile(c.x, c.y) : -1;
 }
 
 function sectorStats(): ServerMsg {
-  const online = new Map<number, number>();
-  for (const p of players.values()) if (p.ws && p.present >= 0) online.set(p.present, (online.get(p.present) ?? 0) + 1);
-  return {
-    op: S2C.SectorStats,
-    sectors: [...sectors.entries()].map(([sector, s]) => ({ sector, online: online.get(sector) ?? 0, colonies: s.sim.pods.size })),
-  };
+  return { op: S2C.SectorStats, sectors: [...sim.sectorCounts()].map(([sector, s]) => ({ sector, ...s })) };
 }
 
-function sendRoster(sector: number): void {
-  const colonists = [...players.values()].filter((p) => p.home === sector);
-  const msg: ServerMsg = {
-    op: S2C.Roster,
-    players: colonists.map((p) => ({ id: p.id, name: p.name, online: !!p.ws && p.present === sector })),
-  };
-  for (const p of players.values()) if (p.present === sector) send(p, msg);
+function broadcastRoster(): void {
+  const msg = encodeServer({ op: S2C.Roster, players: [...players.values()].filter((p) => p.present).slice(0, 200).map((p) => ({ id: p.id, name: p.name })) });
+  for (const p of players.values()) if (p.present && p.ws?.readyState === WebSocket.OPEN) p.ws.send(msg);
 }
 
-function leaveSurface(p: Player): void {
-  const was = p.present;
-  p.present = -1;
-  if (was >= 0) sendRoster(was);
+function setPresent(p: Player, present: boolean): void {
+  if (p.present === present) return;
+  p.present = present;
+  if (present) sim.online.add(p.id); else sim.online.delete(p.id);
+  broadcastRoster();
 }
 
 function handle(p: Player, m: ClientMsg): void {
+  const player = p.id;
   switch (m.op) {
     case C2S.Land: {
-      // One colony per player: landing anywhere else returns you to it.
-      const target = p.home >= 0 ? p.home : m.sector;
-      if (target >= SECTOR_COUNT || !sectorInfo(SEED, target).landable) {
-        send(p, { op: S2C.Notice, text: 'Sector is not landable' });
+      // One character per player: asking to land anywhere returns you to them.
+      const returning = sim.viewCenter(player) !== null;
+      if (!returning && (m.sector >= SECTOR_COUNT || !sectorInfo(SEED, m.sector).landable)) {
+        send(p, { op: S2C.Notice, text: 'No stable ground to land on there' });
         return;
       }
-      const { sim } = getSector(target);
-      const site = sim.landPlayer(p.id, p.name);
-      p.home = target;
-      p.present = target;
-      p.viewCx = Math.floor(site.x / CHUNK_SIZE);
-      p.viewCy = Math.floor(site.y / CHUNK_SIZE);
+      const site = sim.landPlayer(player, p.name, m.sector);
       p.repl.reset();
-      send(p, { op: S2C.Landed, sector: target, x: site.x, y: site.y, tick: sim.tick, fresh: site.fresh });
-      sendRoster(target);
+      setPresent(p, true);
+      // Everything the client keeps about its own character is resent on (re)entry.
+      sim.invDirty.add(player); sim.skillDirty.add(player); sim.craftDirty.add(player);
+      send(p, { op: S2C.Landed, sector: sectorOfTile(site.x, site.y), x: site.x, y: site.y, tick: sim.tick, fresh: site.fresh });
       return;
     }
-    case C2S.Leave: leaveSurface(p); return;
-    case C2S.View:
-      p.viewCx = Math.min(CHUNKS_PER_SIDE - 1, m.cx);
-      p.viewCy = Math.min(CHUNKS_PER_SIDE - 1, m.cy);
-      return;
+    case C2S.Leave: setPresent(p, false); return;
     case C2S.Ping: send(p, { op: S2C.Pong, t: m.t }); return;
-    case C2S.Move: case C2S.Interact: case C2S.Build: {
-      if (p.present < 0) return;
-      const { sim } = getSector(p.present);
-      if (m.op === C2S.Move) sim.enqueue({ type: 'move', player: p.id, units: m.units, x: m.x, y: m.y });
-      else if (m.op === C2S.Interact) sim.enqueue({ type: 'interact', player: p.id, units: m.units, target: m.target });
-      else sim.enqueue({ type: 'build', player: p.id, units: m.units, kind: m.kind, tx: m.tx, ty: m.ty });
-      return;
-    }
     case C2S.Hello: return;
+  }
+  if (!p.present) return;
+  switch (m.op) {
+    case C2S.Input: sim.pushInput(player, m.seq, m.dx, m.dy); break;
+    case C2S.MoveTo: sim.enqueue({ type: 'moveTo', player, x: m.x, y: m.y }); break;
+    case C2S.Interact: sim.enqueue({ type: 'interact', player, target: m.target }); break;
+    case C2S.Build: sim.enqueue({ type: 'build', player, kind: m.kind, tx: m.tx, ty: m.ty }); break;
+    case C2S.InvMove: sim.enqueue({ type: 'invMove', player, uid: m.uid, c: m.c, x: m.x, y: m.y, rot: m.rot }); break;
+    case C2S.InvDrop: sim.enqueue({ type: 'invDrop', player, uid: m.uid }); break;
+    case C2S.InvUse: sim.enqueue({ type: 'invUse', player, uid: m.uid }); break;
+    case C2S.CraftStart: sim.enqueue({ type: 'craftStart', player, pattern: m.pattern }); break;
+    case C2S.CraftHit: sim.enqueue({ type: 'craftHit', player, x: m.x, y: m.y }); break;
+    case C2S.CraftCancel: sim.enqueue({ type: 'craftCancel', player }); break;
+    case C2S.Recipe: sim.enqueue({ type: 'recipe', player, recipe: m.recipe, station: m.station }); break;
+    case C2S.Order: sim.enqueue({ type: 'order', player, npc: m.npc, order: m.order }); break;
+    case C2S.Drink: sim.enqueue({ type: 'drink', player }); break;
   }
 }
 
@@ -137,7 +120,7 @@ function hello(ws: WebSocket, token: string, rawName: string): Player | null {
   const name = rawName.replace(/[^\p{L}\p{N} _-]/gu, '').trim().slice(0, 16) || 'Colonist';
   let p = playersByToken.get(token);
   if (!p) {
-    p = { id: nextPlayerId++, token, name, home: -1, present: -1, ws: null, viewCx: 0, viewCy: 0, repl: new Replicator() };
+    p = { id: nextPlayerId++, token, name, present: false, ws: null, repl: new Replicator() };
     players.set(p.id, p);
     playersByToken.set(token, p);
   } else if (p.ws && p.ws !== ws) {
@@ -145,8 +128,8 @@ function hello(ws: WebSocket, token: string, rawName: string): Player | null {
   }
   p.ws = ws;
   p.name = name;
-  p.present = -1;
-  send(p, { op: S2C.Welcome, playerId: p.id, seed: SEED, tickRate: TICK_RATE, homeSector: p.home });
+  setPresent(p, false);
+  send(p, { op: S2C.Welcome, playerId: p.id, seed: SEED, tickRate: TICK_RATE, homeSector: homeSector(p) });
   send(p, sectorStats());
   return p;
 }
@@ -154,31 +137,30 @@ function hello(ws: WebSocket, token: string, rawName: string): Player | null {
 // --- simulation loop --------------------------------------------------------
 
 function tick(): void {
-  serverTick++;
-  for (const { sim } of sectors.values()) sim.step();
-
-  if (serverTick % SNAPSHOT_EVERY === 0) {
+  sim.step();
+  if (sim.tick % SNAPSHOT_EVERY === 0) {
     for (const p of players.values()) {
-      if (!p.ws || p.present < 0 || p.ws.readyState !== WebSocket.OPEN) continue;
+      if (!p.present || p.ws?.readyState !== WebSocket.OPEN) continue;
       // A stalled socket gets no new snapshots until it drains; state is delta-encoded, so it catches up.
       if (p.ws.bufferedAmount > 1 << 20) continue;
-      const { sim, source } = sectors.get(p.present)!;
-      p.ws.send(p.repl.build(source, p.viewCx, p.viewCy, AOI_RADIUS, sim.unitsOf.get(p.id) ?? []));
+      const centre = sim.viewCenter(p.id);
+      if (!centre) continue;
+      const hero = sim.heroes.get(p.id);
+      p.ws.send(p.repl.build(source, sim.grid.chunkX(centre.x), sim.grid.chunkY(centre.y), AOI_RADIUS, hero !== undefined ? [hero] : []));
+      const self = sim.selfState(p.id);
+      if (self) send(p, { op: S2C.Self, self });
+      if (hero === undefined) continue;
+      if (sim.invDirty.delete(p.id)) send(p, { op: S2C.Inventory, items: sim.world.get(hero, Inv)!.items });
+      if (sim.skillDirty.delete(p.id)) send(p, { op: S2C.Skills, xp: sim.world.get(hero, Char)!.skills });
+      if (sim.craftDirty.delete(p.id)) send(p, { op: S2C.Craft, session: sim.world.get(hero, Char)!.craft });
     }
-    for (const { sim } of sectors.values()) {
-      for (const id of sim.stockDirty) {
-        const p = players.get(id), stock = sim.stock.get(id);
-        if (p && stock && p.present === sim.sectorId) send(p, { op: S2C.Stock, ...stock });
-      }
-      sim.stockDirty.clear();
-      for (const n of sim.notices) {
-        const p = players.get(n.player);
-        if (p) send(p, { op: S2C.Notice, text: n.text });
-      }
-      sim.notices.length = 0;
+    for (const n of sim.notices) {
+      const p = players.get(n.player);
+      if (p) send(p, { op: S2C.Notice, text: n.text });
     }
+    sim.notices.length = 0;
   }
-  if (serverTick % TICK_RATE === 0) {
+  if (sim.tick % TICK_RATE === 0) {
     const stats = encodeServer(sectorStats());
     for (const p of players.values()) if (p.ws?.readyState === WebSocket.OPEN) p.ws.send(stats);
   }
@@ -198,7 +180,7 @@ const http = createServer((req, res) => {
   if (path === '/healthz') {
     res.writeHead(200, { 'content-type': 'application/json' });
     res.end(JSON.stringify({
-      tick: serverTick, avgTickMs: Number(loop.avgTickMs.toFixed(3)), sectors: sectors.size,
+      tick: sim.tick, avgTickMs: Number(loop.avgTickMs.toFixed(3)), entities: sim.world.entityCount,
       players: [...players.values()].filter((p) => p.ws).length,
     }));
     return;
@@ -244,7 +226,7 @@ wss.on('connection', (ws) => {
   ws.on('close', () => {
     if (!player || player.ws !== ws) return;
     player.ws = null;
-    leaveSurface(player);
+    setPresent(player, false);
   });
   ws.on('error', () => ws.close());
 });

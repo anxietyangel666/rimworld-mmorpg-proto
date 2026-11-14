@@ -30,7 +30,9 @@ export class ByteWriter {
 
   u8(v: number): this { this.ensure(1); this.view.setUint8(this.off, v); this.off += 1; return this; }
   u16(v: number): this { this.ensure(2); this.view.setUint16(this.off, v, true); this.off += 2; return this; }
+  i8(v: number): this { this.ensure(1); this.view.setInt8(this.off, v); this.off += 1; return this; }
   i16(v: number): this { this.ensure(2); this.view.setInt16(this.off, v, true); this.off += 2; return this; }
+  f32(v: number): this { this.ensure(4); this.view.setFloat32(this.off, v, true); this.off += 4; return this; }
   u32(v: number): this { this.ensure(4); this.view.setUint32(this.off, v, true); this.off += 4; return this; }
   f64(v: number): this { this.ensure(8); this.view.setFloat64(this.off, v, true); this.off += 8; return this; }
 
@@ -69,7 +71,9 @@ export class ByteReader {
 
   u8(): number { const v = this.view.getUint8(this.off); this.off += 1; return v; }
   u16(): number { const v = this.view.getUint16(this.off, true); this.off += 2; return v; }
+  i8(): number { const v = this.view.getInt8(this.off); this.off += 1; return v; }
   i16(): number { const v = this.view.getInt16(this.off, true); this.off += 2; return v; }
+  f32(): number { const v = this.view.getFloat32(this.off, true); this.off += 4; return v; }
   u32(): number { const v = this.view.getUint32(this.off, true); this.off += 4; return v; }
   f64(): number { const v = this.view.getFloat64(this.off, true); this.off += 8; return v; }
 

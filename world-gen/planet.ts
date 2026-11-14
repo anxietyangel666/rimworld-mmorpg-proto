@@ -92,20 +92,20 @@ export interface SectorInfo {
   /** Resource richness, 0..100. */
   wood: number;
   ore: number;
-  scrap: number;
+  forage: number;
   /** Mean climate, for the orbital readout. */
   temperatureC: number;
 }
 
-/** Relative richness of [wood, ore, scrap] per biome; the surface generator scales node density by it. */
+/** Relative richness of [timber, stone and ore, forage] per biome, for the orbital survey readout. */
 export const BIOME_RESOURCES: Record<Biome, [number, number, number]> = {
   [Biome.Ocean]: [0, 0, 0],
   [Biome.Ice]: [0, 0.2, 0.1],
-  [Biome.Tundra]: [0.3, 0.5, 0.35],
-  [Biome.Forest]: [1, 0.3, 0.2],
-  [Biome.Grassland]: [0.55, 0.4, 0.4],
-  [Biome.Desert]: [0.12, 0.55, 0.9],
-  [Biome.Badlands]: [0.15, 1, 0.55],
+  [Biome.Tundra]: [0.3, 0.5, 0.3],
+  [Biome.Forest]: [1, 0.3, 0.7],
+  [Biome.Grassland]: [0.5, 0.4, 0.9],
+  [Biome.Desert]: [0.1, 0.6, 0.15],
+  [Biome.Badlands]: [0.12, 1, 0.15],
 };
 
 const infoCache = new Map<string, SectorInfo>();
@@ -136,7 +136,7 @@ export function sectorInfo(seed: number, id: number): SectorInfo {
     name: String.fromCharCode(65 + row) + '-' + String(col + 1).padStart(2, '0'),
     biome,
     landable: biome !== Biome.Ocean && biome !== Biome.Ice,
-    wood: pct(w), ore: pct(o), scrap: pct(s),
+    wood: pct(w), ore: pct(o), forage: pct(s),
     temperatureC: Math.round((temp / 9) * 70 - 35),
   };
   infoCache.set(key, info);
