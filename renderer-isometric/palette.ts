@@ -9,13 +9,13 @@ const c = (r: number, g: number, b: number) => new THREE.Color().setRGB(r, g, b,
 export const TILE_COLORS: THREE.Color[] = [];
 TILE_COLORS[TileType.Dirt] = c(0.37, 0.31, 0.24);
 TILE_COLORS[TileType.Grass] = c(0.31, 0.36, 0.22);
-TILE_COLORS[TileType.Sand] = c(0.62, 0.55, 0.41);
+TILE_COLORS[TileType.Sand] = c(0.58, 0.53, 0.42);
 TILE_COLORS[TileType.Rock] = c(0.41, 0.4, 0.38);
 TILE_COLORS[TileType.Snow] = c(0.8, 0.82, 0.84);
 TILE_COLORS[TileType.Water] = c(0.2, 0.25, 0.25);
 TILE_COLORS[TileType.Gravel] = c(0.46, 0.44, 0.4);
 TILE_COLORS[TileType.Steppe] = c(0.45, 0.43, 0.27);
-TILE_COLORS[TileType.RedEarth] = c(0.46, 0.33, 0.25);
+TILE_COLORS[TileType.RedEarth] = c(0.43, 0.34, 0.28);
 
 export const SUN_COLOR = c(1.0, 0.93, 0.82);
 export const SKY_COLOR = c(0.62, 0.7, 0.8);
@@ -29,7 +29,7 @@ export function gradeFor(temperature: number, moisture: number, out: Grade): Gra
   out.haze.setRGB(0.72 + heat * 0.1, 0.76 - heat * 0.06 * dry, 0.8 - heat * 0.26 * (0.4 + dry * 0.6), THREE.SRGBColorSpace);
   out.hazeAmount = 0.45 + dry * heat * 0.3 + (1 - heat) * 0.2;
   out.tint.setRGB(0.96 + heat * 0.08, 0.99, 1.04 - heat * 0.12);
-  out.desaturate = 0.3 + (1 - heat) * 0.12 + dry * 0.06;
+  out.desaturate = 0.42 + (1 - heat) * 0.1 + dry * 0.06;
   return out;
 }
 

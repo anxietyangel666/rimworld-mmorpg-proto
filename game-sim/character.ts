@@ -67,8 +67,8 @@ const set = (v: Vitals, flag: Status, on: boolean) => { v.status = on ? v.status
 /** Advance a character's condition by dt seconds. Returns true if they collapsed (hp reached 0). */
 export function tickVitals(v: Vitals, dt: number, env: VitalsEnv): boolean {
   const effort = env.working ? 1.5 : env.moving ? 1.25 : 1;
-  v.satiety = clamp(v.satiety - (100 / 900) * effort * dt, 0, 100);
-  v.hydration = clamp(v.hydration - (100 / 600) * effort * (v.temp > 38 ? 1.6 : 1) * dt, 0, 100);
+  v.satiety = clamp(v.satiety - (100 / 1800) * effort * dt, 0, 100);
+  v.hydration = clamp(v.hydration - (100 / 1200) * effort * (v.temp > 38 ? 1.6 : 1) * dt, 0, 100);
 
   if (env.moving) v.stamina -= 1.3 * LOAD_STAMINA[env.tier] * (env.inWater ? 2 : 1) * dt;
   else if (env.working) v.stamina -= 0.5 * dt;

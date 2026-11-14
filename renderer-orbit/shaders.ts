@@ -104,10 +104,10 @@ void main() {
   if (glint + dith * 0.25 > 0.5 && band > 0.0) col = vec3(1.0, 0.95, 0.82);
 
   // --- sharp atmospheric rim, in three bands ---
-  float fres = pow(1.0 - max(dot(smoothDir, V), 0.0), 2.6);
+  float fres = pow(1.0 - max(dot(smoothDir, V), 0.0), 4.0);
   float rim = floor(clamp(fres * 1.6, 0.0, 0.999) * 4.0) / 3.0;
   vec3 scatter = sunUp < 0.1 ? vec3(1.0, 0.42, 0.18) : vec3(0.25, 0.5, 1.0);
-  col += scatter * rim * 0.45 * step(-0.12, dot(smoothDir, L));
+  col += scatter * rim * (sunUp < 0.1 ? 0.2 : 0.34) * step(-0.08, dot(smoothDir, L));
 
   // --- sector grid, hover/selection and colony markers ---
   vec2 g = dirToUv(smoothDir) * SECTORS;

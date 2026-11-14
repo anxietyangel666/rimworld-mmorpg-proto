@@ -9,8 +9,8 @@ const CELL = 36;
 const GRID_NAMES: Partial<Record<Cont, string>> = { [Cont.Pockets]: 'Pockets', [Cont.BeltGrid]: 'Belt pouch', [Cont.PackGrid]: 'Pack' };
 /** Paper-doll layout, in cells: roughly where each slot sits on a body. */
 const DOLL: Record<Slot, [number, number]> = {
-  [Slot.Head]: [1.2, 0], [Slot.Torso]: [1.2, 2.2], [Slot.Legs]: [1.2, 4.4],
-  [Slot.Hands]: [-0.0, 2.2], [Slot.Back]: [2.4, 0.4], [Slot.Belt]: [2.4, 3.3],
+  [Slot.Head]: [1.7, 0], [Slot.Torso]: [1.7, 1.7], [Slot.Legs]: [1.7, 3.4],
+  [Slot.Hands]: [0, 1.7], [Slot.Back]: [3.4, 0.5], [Slot.Belt]: [3.4, 2.2],
 };
 
 interface Drag {

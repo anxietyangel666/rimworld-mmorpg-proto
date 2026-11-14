@@ -448,7 +448,7 @@ function frame(now: number): void {
     if (mode === 'surface') surface.update(dt, now);
     iso.update(dt, time, now, mirror.serverTick(now));
     const g = iso.grade;
-    post.desaturate = g.desaturate; post.vignette = 0.4; post.tint.copy(g.tint); post.exposure = 1.1; post.contrast = 1.2;
+    post.desaturate = g.desaturate; post.vignette = 0.4; post.tint.copy(g.tint); post.exposure = 1.08; post.contrast = 1.1;
     post.heat = 0;
     post.cloud = mode === 'ascent' ? smooth(0, 0.6, fade) : 1 - smooth(0.05, 0.5, iso.introProgress);
     post.render(iso.scene, iso.camera, time);

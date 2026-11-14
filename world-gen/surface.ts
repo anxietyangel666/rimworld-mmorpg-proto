@@ -312,6 +312,6 @@ export class Surface {
 
   /** Air temperature in degrees C at a tile, from planetary climate. */
   ambientC(x: number, y: number): number {
-    return this.field.at(x, y, this.c).temperature * 58 - 20;
+    return this.field.at(x, y, this.c).temperature * 48 - 18;
   }
 }
