@@ -19,7 +19,7 @@
 		},
 		"run": {
 			"enabled": true,
-			"command": "npm run dev"
+			"command": "PORT=5173 npm run dev"
 		},
 		"archive": {
 			"enabled": true,
