@@ -1,12 +1,20 @@
-import { CLOUDS_GLSL, NOISE_GLSL, SPHERE_UV_GLSL } from '../renderer-core/glsl';
+import { CLOUDS_GLSL, NOISE_GLSL, PIXEL_GLSL, SPHERE_UV_GLSL } from '../renderer-core/glsl';
 import { SECTOR_COLS, SECTOR_ROWS } from '../world-gen/planet';
 
 /**
- * Home planet surface. All lighting is done in the planet's object space
- * (uSunLocal / uCamLocal), so the planet can spin without re-deriving the
- * sector grid: a direction on the unit sphere is the lookup key for climate,
- * clouds and sectors alike.
+ * Home planet, drawn as retro pixel art on a 3D sphere. Every fragment is
+ * snapped to a texel fixed on the surface (see PIXEL_GLSL); biome, lighting
+ * and cloud shadow are then decided once per texel from a small palette with
+ * ordered dithering, which gives hard coastlines and stepped shading instead
+ * of blurred gradients.
+ *
+ * Lighting is done in the planet's object space (uSunLocal / uCamLocal), so
+ * the planet can spin without re-deriving the sector grid.
  */
+
+/** Texels along one cube face; 4x this around the equator. */
+const TEXELS = '112.0';
+
 export const PLANET_VERT = /* glsl */ `
 uniform sampler2D uMap;
 uniform float uRadius;
@@ -17,7 +25,7 @@ void main() {
   vec3 d = normalize(position);
   float e = texture2D(uMap, dirToUv(d)).r * 2.0 - 1.0;
   // Real geometric relief, exaggerated enough to break the limb silhouette.
-  vec3 p = d * uRadius * (1.0 + max(e, 0.0) * 0.014);
+  vec3 p = d * uRadius * (1.0 + max(e, 0.0) * 0.012);
   vDir = d;
   vPos = p;
   gl_Position = projectionMatrix * modelViewMatrix * vec4(p, 1.0);
@@ -36,101 +44,95 @@ varying vec3 vDir;
 varying vec3 vPos;
 ${NOISE_GLSL}
 ${SPHERE_UV_GLSL}
+${PIXEL_GLSL}
 ${CLOUDS_GLSL}
 
 const vec2 SECTORS = vec2(${SECTOR_COLS}.0, ${SECTOR_ROWS}.0);
-const vec2 MAP_TEXEL = vec2(1.0 / 1024.0, 1.0 / 512.0);
+const vec2 MAP_STEP = vec2(1.0 / 400.0, 1.0 / 200.0);
 
 float elevationAt(vec2 uv) { return texture2D(uMap, uv).r * 2.0 - 1.0; }
 
 void main() {
-  vec3 d = normalize(vDir);
+  vec3 smoothDir = normalize(vDir);
+  vec2 cell;
+  vec3 d = snapDir(smoothDir, ${TEXELS}, cell);
+  float dith = bayer4(cell) - 0.5;
   vec2 uv = dirToUv(d);
   vec3 climate = texture2D(uMap, uv).rgb;
-  // High-frequency procedural detail on top of the baked climate: fractal
-  // coastlines and mottled biomes without a bigger texture.
-  float detail = fbm(d * 42.0);
-  float detail2 = fbm3(d * 17.0 + 5.0);
-  float e = climate.r * 2.0 - 1.0 + (detail - 0.5) * 0.07;
-  float m = climate.g + (detail2 - 0.5) * 0.12;
-  float t = climate.b + (detail2 - 0.5) * 0.05;
+  // Per-texel detail on top of the baked climate: ragged coasts and mottled biomes.
+  float detail = fbm(d * 40.0);
+  float e = climate.r * 2.0 - 1.0 + (detail - 0.5) * 0.08 + dith * 0.02;
+  float m = climate.g + dith * 0.07;
+  float t = climate.b + dith * 0.04;
 
-  // --- biome ramp (thresholds mirror classifyBiome) ---
-  vec3 desert = vec3(0.56, 0.44, 0.29), badlands = vec3(0.38, 0.27, 0.20);
-  vec3 grass = vec3(0.23, 0.30, 0.15), forest = vec3(0.07, 0.16, 0.08);
-  vec3 tundra = vec3(0.36, 0.36, 0.30), rock = vec3(0.31, 0.29, 0.27);
-  float dry = 1.0 - smoothstep(0.33, 0.39, m);
-  float wet = smoothstep(0.53, 0.59, m);
-  vec3 land = mix(grass, forest, wet);
-  land = mix(land, mix(badlands, desert, smoothstep(0.46, 0.54, t)), dry);
-  land = mix(land, mix(badlands, rock, 0.5), smoothstep(0.44, 0.56, e));
-  land = mix(land, tundra, 1.0 - smoothstep(0.27, 0.33, t));
-  land = mix(vec3(0.50, 0.46, 0.35), land, smoothstep(0.0, 0.035, e));
-  land *= 0.82 + detail * 0.36;
-  float water = 1.0 - smoothstep(-0.006, 0.006, e);
-  vec3 sea = mix(vec3(0.045, 0.17, 0.24), vec3(0.01, 0.035, 0.10), smoothstep(0.0, 0.4, -e));
-  float snow = max(1.0 - smoothstep(0.12, 0.16, t), smoothstep(0.72, 0.9, e) * (1.0 - water));
-  vec3 albedo = mix(mix(land, sea, water), vec3(0.84, 0.87, 0.91), snow);
+  // --- palette pick (thresholds mirror classifyBiome) ---
+  vec3 albedo;
+  float water = 0.0;
+  if (t < 0.14) albedo = vec3(0.80, 0.85, 0.90);
+  else if (e < -0.3) { albedo = vec3(0.02, 0.06, 0.16); water = 1.0; }
+  else if (e < -0.08) { albedo = vec3(0.03, 0.11, 0.22); water = 1.0; }
+  else if (e < 0.0) { albedo = vec3(0.06, 0.20, 0.28); water = 1.0; }
+  else if (e < 0.025) albedo = vec3(0.55, 0.49, 0.33);
+  else if (e > 0.78) albedo = vec3(0.80, 0.85, 0.90);
+  else if (t < 0.3) albedo = vec3(0.38, 0.40, 0.34);
+  else if (e > 0.5) albedo = vec3(0.30, 0.27, 0.25);
+  else if (m < 0.36) albedo = t > 0.5 ? vec3(0.62, 0.48, 0.29) : vec3(0.42, 0.28, 0.20);
+  else if (m > 0.56) albedo = vec3(0.07, 0.19, 0.09);
+  else albedo = vec3(0.26, 0.34, 0.14);
 
-  // --- normal from the elevation gradient plus fine bump ---
+  // --- stepped lighting from the elevation gradient ---
   float cosLat = max(0.08, sqrt(1.0 - d.y * d.y));
   vec3 east = normalize(cross(vec3(0.0, 1.0, 0.0), d));
   vec3 north = cross(d, east);
-  float dEdu = elevationAt(uv + vec2(MAP_TEXEL.x, 0.0)) - elevationAt(uv - vec2(MAP_TEXEL.x, 0.0));
-  float dEdv = elevationAt(uv + vec2(0.0, MAP_TEXEL.y)) - elevationAt(uv - vec2(0.0, MAP_TEXEL.y));
-  float bumpE = fbm(d * 42.0 + east * 0.02) - detail;
-  float bumpN = fbm(d * 42.0 + north * 0.02) - detail;
-  vec3 grad = east * (dEdu * 22.0 / cosLat + bumpE * 9.0) + north * (dEdv * 22.0 + bumpN * 9.0);
-  vec3 n = normalize(d - grad * (1.0 - water) * (1.0 - snow * 0.6));
-
+  float dEdu = elevationAt(uv + vec2(MAP_STEP.x, 0.0)) - elevationAt(uv - vec2(MAP_STEP.x, 0.0));
+  float dEdv = elevationAt(uv + vec2(0.0, MAP_STEP.y)) - elevationAt(uv - vec2(0.0, MAP_STEP.y));
+  vec3 n = normalize(d - (east * dEdu / cosLat + north * dEdv) * 9.0 * (1.0 - water));
   vec3 L = normalize(uSunLocal);
   vec3 V = normalize(uCamLocal - vPos);
   float sunUp = dot(d, L);
-  // Wide, soft terminator; the geometric term keeps bumped normals from lighting the night side.
-  float day = smoothstep(-0.12, 0.22, sunUp);
-  float diffuse = max(dot(n, L), 0.0) * day;
+  float lit = max(dot(n, L), 0.0) * smoothstep(-0.05, 0.12, sunUp);
+  // Cloud shadows are cast by the same texels the cloud shell draws, displaced toward the sun.
+  vec2 cloudCell;
+  vec3 cloudDir = snapDir(cloudFrame(normalize(d + L * 0.016), uTime), ${TEXELS}, cloudCell);
+  if (cloudAt(cloudDir, uTime) > 0.5) lit *= 0.5;
+  float band = floor(clamp(lit * 1.2 + dith * 0.2, 0.0, 0.999) * 5.0) / 4.0;
+  vec3 sunCol = sunUp < 0.12 ? vec3(1.0, 0.58, 0.32) : vec3(1.0, 0.97, 0.92);
+  vec3 col = albedo * (0.035 * vec3(0.5, 0.7, 1.3) + band * 1.05 * sunCol);
 
-  // Clouds cast shadows displaced along the sun direction (they float above the ground).
-  float shadow = 1.0 - 0.62 * cloudDensity(normalize(d + L * 0.014), uTime);
+  // Sun glint: a few hard bright pixels on open water.
+  float glint = pow(max(dot(d, normalize(L + V)), 0.0), 140.0) * water;
+  if (glint + dith * 0.25 > 0.5 && band > 0.0) col = vec3(1.0, 0.95, 0.82);
 
-  vec3 H = normalize(L + V);
-  float spec = pow(max(dot(normalize(mix(n, d, 0.85)), H), 0.0), 90.0) * water * (1.0 - snow) * 1.6;
-  vec3 sunCol = mix(vec3(1.0, 0.5, 0.25), vec3(1.0, 0.96, 0.9), smoothstep(0.0, 0.2, sunUp));
-  vec3 col = albedo * (diffuse * sunCol * 1.15 * shadow + vec3(0.008, 0.012, 0.024)) + sunCol * spec * shadow * day;
-
-  // --- atmosphere seen against the surface: Rayleigh rim, warm at the terminator ---
-  float fres = pow(1.0 - max(dot(d, V), 0.0), 3.2);
-  vec3 scatter = mix(vec3(1.0, 0.4, 0.16), vec3(0.22, 0.45, 1.0), smoothstep(-0.08, 0.14, sunUp));
-  col += scatter * fres * smoothstep(-0.2, 0.2, sunUp) * 0.5;
-  col += vec3(0.008, 0.016, 0.035) * day;
+  // --- sharp atmospheric rim, in three bands ---
+  float fres = pow(1.0 - max(dot(smoothDir, V), 0.0), 2.6);
+  float rim = floor(clamp(fres * 1.6, 0.0, 0.999) * 4.0) / 3.0;
+  vec3 scatter = sunUp < 0.1 ? vec3(1.0, 0.42, 0.18) : vec3(0.25, 0.5, 1.0);
+  col += scatter * rim * 0.45 * step(-0.12, dot(smoothDir, L));
 
   // --- sector grid, hover/selection and colony markers ---
-  vec2 g = uv * SECTORS;
-  vec2 cell = floor(g);
+  vec2 g = dirToUv(smoothDir) * SECTORS;
+  vec2 sector = floor(g);
   vec2 f = fract(g);
-  float id = cell.x + cell.y * SECTORS.x;
-  vec3 stats = texture2D(uStats, (cell + 0.5) / SECTORS).rgb;
-  vec2 fw = max(fwidth(g), vec2(1e-4));
+  float id = sector.x + sector.y * SECTORS.x;
+  vec3 stats = texture2D(uStats, (sector + 0.5) / SECTORS).rgb;
   // The longitude seam makes fwidth spike; clamp so it reads as a normal line.
-  fw = min(fw, vec2(0.08));
+  vec2 fw = min(max(fwidth(g), vec2(1e-4)), vec2(0.08));
   vec2 edge = min(f, 1.0 - f) / fw;
-  float line = 1.0 - smoothstep(0.6, 1.6, min(edge.x, edge.y));
-  vec3 accent = stats.b > 0.5 ? vec3(0.25, 0.95, 0.85) : vec3(0.75, 0.3, 0.25);
-  col += vec3(0.25, 0.8, 0.75) * line * 0.10 * uGrid;
+  float nearest = min(edge.x, edge.y);
+  vec3 accent = stats.b > 0.5 ? vec3(0.93, 0.80, 0.50) : vec3(0.75, 0.30, 0.25);
+  col += vec3(0.75, 0.68, 0.50) * step(nearest, 0.9) * 0.10 * uGrid;
   float isHover = 1.0 - step(0.5, abs(id - uHover));
   float isSel = 1.0 - step(0.5, abs(id - uSelected));
-  float border = 1.0 - smoothstep(1.2, 3.0, min(edge.x, edge.y));
-  col += accent * (isHover * (0.07 + border * 0.55) + isSel * (0.10 + border * (0.75 + 0.25 * sin(uTime * 4.0)))) * uGrid;
+  float border = step(nearest, 2.2);
+  col += accent * (isHover * (0.05 + border * 0.6) + isSel * (0.08 + border * (0.75 + 0.25 * sin(uTime * 4.0)))) * uGrid;
 
-  // Colonies: a ring by day (amber when someone is online), warm lights by night.
-  vec2 c = (f - 0.5) * vec2(cosLat * 2.0, 1.0);
-  float rc = length(c);
+  // Colonies: a square marker by day (bright while someone is down there), firelight by night.
+  vec2 c = abs(f - 0.5) * vec2(cosLat * 2.0, 1.0);
+  float box = max(c.x, c.y);
   float colony = step(0.004, stats.r);
-  float ring = (1.0 - smoothstep(0.02, 0.05, abs(rc - 0.2))) * colony;
-  vec3 ringCol = stats.g > 0.004 ? vec3(1.0, 0.72, 0.25) * (0.75 + 0.25 * sin(uTime * 5.0)) : vec3(0.3, 0.75, 0.7);
-  col += ringCol * ring * 0.9 * uGrid;
-  float lights = colony * exp(-rc * rc * 60.0) * (0.5 + 0.5 * vnoise(vec3(f * 40.0, 1.0)));
-  col += vec3(1.0, 0.7, 0.35) * lights * (1.0 - day) * 1.4;
+  float marker = step(0.16, box) * step(box, 0.22) * colony;
+  col += (stats.g > 0.004 ? vec3(1.0, 0.75, 0.3) * (0.75 + 0.25 * sin(uTime * 5.0)) : vec3(0.6, 0.55, 0.42)) * marker * uGrid;
+  if (colony > 0.5 && band == 0.0 && box < 0.12 && hash31(vec3(cell, 7.0)) > 0.45) col = vec3(1.0, 0.66, 0.3);
 
   gl_FragColor = vec4(col, 1.0);
 }`;
@@ -147,30 +149,33 @@ void main() {
 
 export const CLOUD_FRAG = /* glsl */ `
 uniform vec3 uSunLocal;
-uniform vec3 uCamLocal;
 uniform float uTime;
 uniform float uFade;
 varying vec3 vDir;
 varying vec3 vPos;
 ${NOISE_GLSL}
+${PIXEL_GLSL}
 ${CLOUDS_GLSL}
 void main() {
   vec3 d = normalize(vDir);
   vec3 L = normalize(uSunLocal);
-  float dens = cloudDensity(d, uTime);
-  if (dens < 0.01) discard;
+  vec2 cell;
+  vec3 r = snapDir(cloudFrame(d, uTime), ${TEXELS}, cell);
+  float dith = bayer4(cell) - 0.5;
+  float dens = cloudAt(r, uTime);
+  // Hard-edged cloud pixels; the fade (used while diving through them) dissolves by dither.
+  if (dens <= 0.5 || uFade < bayer4(cell) + 0.03) discard;
   float sunUp = dot(d, L);
-  float day = smoothstep(-0.15, 0.25, sunUp);
-  // Self-shadowing: thicker cloud toward the sun darkens this sample.
-  float occl = cloudDensity(normalize(d + L * 0.02), uTime);
-  float lit = mix(1.0, 0.55, occl * dens);
-  vec3 sunCol = mix(vec3(1.0, 0.45, 0.2), vec3(1.0), smoothstep(0.0, 0.2, sunUp));
-  vec3 col = sunCol * day * lit * 0.9 + vec3(0.01, 0.014, 0.025);
-  float limb = pow(1.0 - max(dot(d, normalize(uCamLocal - vPos)), 0.0), 2.0);
-  gl_FragColor = vec4(col, dens * (0.92 - limb * 0.3) * uFade);
+  // Two tones: a lit top, and a shaded underside where thicker cloud lies toward the sun.
+  vec2 unused;
+  float toward = cloudAt(snapDir(cloudFrame(normalize(d + L * 0.03), uTime), ${TEXELS}, unused), uTime);
+  float tone = toward > 0.75 ? 0.62 : 1.0;
+  float band = floor(clamp(smoothstep(-0.1, 0.25, sunUp) + dith * 0.2, 0.0, 0.999) * 4.0) / 3.0;
+  vec3 sunCol = sunUp < 0.12 ? vec3(1.0, 0.6, 0.38) : vec3(1.0);
+  gl_FragColor = vec4(sunCol * band * tone * 0.92 + vec3(0.012, 0.016, 0.03), 1.0);
 }`;
 
-/** Atmosphere shell: additive Fresnel glow, blue on the day side and amber where the sun grazes. */
+/** Atmosphere shell: additive rim in hard concentric bands, blue by day and amber where the sun grazes. */
 export const ATMO_VERT = /* glsl */ `
 varying vec3 vN;
 varying vec3 vW;
@@ -188,15 +193,15 @@ varying vec3 vW;
 void main() {
   vec3 n = normalize(vN);
   vec3 V = normalize(cameraPosition - vW);
-  // Optical depth is longest at grazing angles; fade the very outer edge so the shell has no hard rim.
   float f = 1.0 - max(dot(n, V), 0.0);
-  float glow = pow(f, 3.5) * (1.0 - smoothstep(0.7, 1.0, f)) * 1.0;
+  // Three stepped rings instead of a soft falloff.
+  float glow = floor(clamp(pow(f, 3.0) * (1.0 - smoothstep(0.78, 0.98, f)) * 3.2, 0.0, 0.999) * 3.0) / 3.0;
   float sunUp = dot(n, normalize(uSunDir));
-  vec3 col = mix(vec3(1.0, 0.4, 0.15), vec3(0.22, 0.46, 1.0), smoothstep(-0.12, 0.16, sunUp));
-  gl_FragColor = vec4(col * glow * smoothstep(-0.3, 0.25, sunUp), 1.0);
+  vec3 col = sunUp < 0.08 ? vec3(1.0, 0.4, 0.15) : vec3(0.22, 0.46, 1.0);
+  gl_FragColor = vec4(col * glow * 0.85 * step(-0.18, sunUp), 1.0);
 }`;
 
-/** Other bodies in the system: banded gas giants, mottled rock and ice. */
+/** Other bodies in the system: banded gas giants, mottled rock and ice, in the same pixel style. */
 export const BODY_VERT = /* glsl */ `
 varying vec3 vDir;
 varying vec3 vN;
@@ -219,8 +224,11 @@ varying vec3 vDir;
 varying vec3 vN;
 varying vec3 vW;
 ${NOISE_GLSL}
+${PIXEL_GLSL}
 void main() {
-  vec3 d = normalize(vDir);
+  vec2 cell;
+  vec3 d = snapDir(normalize(vDir), 56.0, cell);
+  float dith = bayer4(cell) - 0.5;
   float pattern;
   if (uKind > 0.5 && uKind < 1.5) {
     float turb = fbm(d * vec3(2.0, 7.0, 2.0) + vec3(uTime * 0.003, 0.0, 0.0));
@@ -228,13 +236,12 @@ void main() {
   } else {
     pattern = fbm(d * 5.0) * 1.3 - 0.15;
   }
-  vec3 albedo = mix(uColorB, uColorA, clamp(pattern, 0.0, 1.0));
+  vec3 albedo = mix(uColorB, uColorA, floor(clamp(pattern + dith * 0.25, 0.0, 0.999) * 4.0) / 3.0);
+  // Light the snapped direction (rotated into world space by the same matrix as the normal).
   vec3 n = normalize(vN);
-  float sunUp = dot(n, normalize(uSunDir));
-  vec3 col = albedo * (smoothstep(-0.08, 0.3, sunUp) * max(sunUp, 0.0) * 1.5 + 0.012);
-  float f = pow(1.0 - max(dot(n, normalize(cameraPosition - vW)), 0.0), 3.0);
-  col += mix(uColorA, vec3(0.5, 0.7, 1.0), 0.5) * f * smoothstep(-0.2, 0.3, sunUp) * (uKind > 0.5 ? 0.6 : 0.08);
-  gl_FragColor = vec4(col, 1.0);
+  float lit = max(dot(n, normalize(uSunDir)), 0.0);
+  float band = floor(clamp(lit * 1.2 + dith * 0.2, 0.0, 0.999) * 5.0) / 4.0;
+  gl_FragColor = vec4(albedo * (0.02 + band * 1.3), 1.0);
 }`;
 
 /** Planetary ring: radial dust bands with a gap, darkened where the planet shadows it. */
@@ -280,7 +287,7 @@ varying vec3 vW;
 ${NOISE_GLSL}
 void main() {
   vec3 d = normalize(vDir);
-  float gran = fbm(d * 9.0 + uTime * 0.02) * 0.6 + fbm3(d * 30.0 - uTime * 0.05) * 0.4;
+  float gran = floor((fbm(d * 9.0 + uTime * 0.02) * 0.6 + fbm3(d * 30.0 - uTime * 0.05) * 0.4) * 5.0) / 5.0;
   float mu = max(dot(normalize(vN), normalize(cameraPosition - vW)), 0.0);
   gl_FragColor = vec4(uColor * (2.2 + gran * 3.0) * (0.45 + 0.55 * mu), 1.0);
 }`;
@@ -318,7 +325,7 @@ float starLayer(vec3 d, float scale, float density) {
   vec3 centre = cell + 0.25 + 0.5 * vec3(hash31(cell + 11.0), hash31(cell + 23.0), hash31(cell + 37.0));
   float dist = length(p - centre);
   float bright = (h - density) / (1.0 - density);
-  return smoothstep(0.16, 0.0, dist) * (0.25 + bright * bright * 2.2);
+  return step(dist, 0.09) * (0.25 + bright * bright * 2.2);
 }
 void main() {
   vec3 d = normalize(vDir);

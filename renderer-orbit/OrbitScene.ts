@@ -76,7 +76,7 @@ export class OrbitScene {
     const mapW = 1024, mapH = 512;
     const map = new THREE.DataTexture(bakePlanetMaps(seed, mapW, mapH), mapW, mapH, THREE.RGBAFormat);
     map.wrapS = THREE.RepeatWrapping;
-    map.magFilter = map.minFilter = THREE.LinearFilter;
+    map.magFilter = map.minFilter = THREE.NearestFilter;
     map.needsUpdate = true;
 
     const stats = new Uint8Array(SECTOR_COUNT * 4);
@@ -97,7 +97,7 @@ export class OrbitScene {
     planet.frustumCulled = false;
     this.cloudMat = new THREE.ShaderMaterial({
       vertexShader: CLOUD_VERT, fragmentShader: CLOUD_FRAG, uniforms: { ...shared, uFade: { value: 1 } },
-      transparent: true, depthWrite: false,
+      // Opaque cut-out pixels: no blending, so no sorting artefacts against the surface.
     });
     const clouds = new THREE.Mesh(new THREE.SphereGeometry(HOME_RADIUS * 1.022, 128, 64), this.cloudMat);
     this.atmoMat = new THREE.ShaderMaterial({

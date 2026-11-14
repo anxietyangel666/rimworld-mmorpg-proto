@@ -3,22 +3,21 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>EXO//COLONY — vertical slice</title>
+    <title>Exo Colony — survival slice</title>
     <link rel="stylesheet" href="./style.css" />
   </head>
   <body>
     <canvas id="view"></canvas>
     <div id="plates"></div>
-    <div id="selbox"></div>
 
     <div id="hud">
       <section id="boot" class="screen">
         <div class="card">
-          <h1>EXO<span>//</span>COLONY</h1>
-          <p class="sub">Orbital survey &amp; surface colony — multiplayer vertical slice</p>
-          <label for="callsign">Callsign</label>
+          <h1>Exo Colony</h1>
+          <p class="sub">Expedition ledger — one settler, one planet, whatever you can carry.</p>
+          <label for="callsign">Name</label>
           <input id="callsign" maxlength="16" autocomplete="off" spellcheck="false" />
-          <button id="enter" class="primary">Enter orbit</button>
+          <button id="enter" class="primary">Board the survey ship</button>
           <p id="boot-status" class="dim"></p>
         </div>
       </section>
@@ -29,26 +28,26 @@
           <div id="sys-sub" class="dim"></div>
         </div>
         <div class="panel right" id="sector-panel">
-          <div class="dim small">Sector</div>
+          <div class="label">Survey sheet</div>
           <h2 id="sec-name">—</h2>
           <div id="sec-biome" class="accent"></div>
           <dl>
             <dt>Mean temp</dt><dd id="sec-temp"></dd>
             <dt>Timber</dt><dd><div class="bar"><i id="sec-wood"></i></div></dd>
-            <dt>Ore</dt><dd><div class="bar"><i id="sec-ore"></i></div></dd>
-            <dt>Salvage</dt><dd><div class="bar"><i id="sec-scrap"></i></div></dd>
-            <dt>Colonies</dt><dd id="sec-colonies"></dd>
-            <dt>Players on surface</dt><dd id="sec-online"></dd>
+            <dt>Stone &amp; ore</dt><dd><div class="bar"><i id="sec-ore"></i></div></dd>
+            <dt>Forage</dt><dd><div class="bar"><i id="sec-forage"></i></div></dd>
+            <dt>Landing sites</dt><dd id="sec-colonies"></dd>
+            <dt>Settlers present</dt><dd id="sec-online"></dd>
           </dl>
           <button id="deploy" class="primary" disabled>Deploy / Land</button>
           <div id="sec-note" class="dim small"></div>
         </div>
-        <div class="hint">Drag: rotate · Right-drag: pan · Wheel: zoom · Click a sector to select it</div>
+        <div class="hint">Drag: turn the globe · Right-drag: pan · Wheel: zoom · Click a sector to mark it</div>
       </section>
 
       <section id="entry-ui" hidden>
         <div class="entry-readout">
-          <div class="accent">Atmospheric entry</div>
+          <div class="accent">Descent</div>
           <div id="entry-alt"></div>
         </div>
       </section>
@@ -57,27 +56,73 @@
         <div class="panel top-left topbar">
           <div>
             <h2 id="loc-name"></h2>
-            <div id="loc-biome" class="dim small"></div>
+            <div id="loc-sub" class="dim small"></div>
           </div>
-          <div class="stock"><span>Timber</span><b id="st-wood">0</b></div>
-          <div class="stock"><span>Ore</span><b id="st-ore">0</b></div>
-          <div class="stock"><span>Salvage</span><b id="st-scrap">0</b></div>
-          <button id="leave">Return to orbit</button>
+          <button id="btn-char">Pack <kbd>Tab</kbd></button>
+          <button id="btn-craft">Craft <kbd>K</kbd></button>
+          <button id="btn-drink">Drink <kbd>F</kbd></button>
+          <button id="leave">To orbit</button>
         </div>
+
         <div class="panel right roster">
-          <div class="dim small">Colonists in sector</div>
+          <div class="label">Settlers on the surface</div>
           <ul id="roster"></ul>
         </div>
-        <div class="panel bottom-left" id="sel-panel">
-          <div class="dim small">Selection</div>
-          <ul id="sel-list"></ul>
+
+        <div class="panel right" id="follower-panel" hidden>
+          <div class="label">Follower</div>
+          <h2 id="fol-name"></h2>
+          <div id="fol-orders" class="orders"></div>
         </div>
+
+        <div class="panel bottom-left" id="vitals">
+          <div class="vital"><span>Health</span><div class="bar hp"><i id="v-hp"></i></div><b id="t-hp"></b></div>
+          <div class="vital"><span>Satiety</span><div class="bar food"><i id="v-sat"></i></div><b id="t-sat"></b></div>
+          <div class="vital"><span>Water</span><div class="bar water"><i id="v-hyd"></i></div><b id="t-hyd"></b></div>
+          <div class="vital"><span>Stamina</span><div class="bar stam"><i id="v-sta"></i></div><b id="t-sta"></b></div>
+          <div class="vital"><span>Body</span><div class="bar temp"><i id="v-temp"></i></div><b id="t-temp"></b></div>
+          <div class="vital"><span>Load</span><div class="bar load"><i id="v-load"></i></div><b id="t-load"></b></div>
+          <div id="status-chips"></div>
+        </div>
+
+        <div id="workbar" hidden><span id="work-label"></span><div class="bar"><i id="work-fill"></i></div></div>
         <div class="panel bottom-center" id="build-bar"></div>
-        <div class="hint">
-          Left-drag: box select · Right-click: move / harvest / build · 1-3: blueprints · WASD or middle-drag: pan · Wheel: zoom · Q/E: rotate · H: home
+
+        <div class="window" id="char-window" hidden>
+          <header><h2>Pack &amp; person</h2><button class="close" data-close="char-window">x</button></header>
+          <div class="char-body">
+            <div>
+              <div class="label">Worn</div>
+              <div id="doll"></div>
+            </div>
+            <div id="grids"></div>
+            <div class="skills">
+              <div class="label">Skills</div>
+              <ul id="skills"></ul>
+            </div>
+          </div>
+          <footer class="dim small">Drag to move · <kbd>R</kbd> turns the item in hand · Right-click: eat, drink, wear · Drag out of the window to drop</footer>
+        </div>
+
+        <div class="window" id="craft-window" hidden>
+          <header><h2 id="craft-title">Handwork</h2><button class="close" data-close="craft-window">x</button></header>
+          <div class="craft-body">
+            <div id="craft-lists"></div>
+            <div id="carve" hidden>
+              <div class="label" id="carve-title"></div>
+              <div id="carve-grid"></div>
+              <div id="carve-help" class="dim small"></div>
+              <button id="carve-cancel">Set it aside</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="hint" id="surface-hint">
+          <kbd>WASD</kbd> walk · Click: go there / gather / pick up / use · <kbd>Q</kbd><kbd>E</kbd> turn view · Wheel: zoom · <kbd>1</kbd>-<kbd>8</kbd> build · <kbd>Esc</kbd> cancel
         </div>
       </section>
 
+      <div id="tooltip" hidden></div>
       <div id="toast"></div>
       <div id="net" class="dim small"></div>
     </div>

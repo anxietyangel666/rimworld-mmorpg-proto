@@ -4,14 +4,13 @@ import { NOISE_GLSL } from './glsl';
 /**
  * Single-pass post pipeline shared by both views. Scenes render in linear HDR
  * to a multisampled target; one fullscreen pass then tone-maps, grades
- * (desaturation, tint, vignette, grain) and composites the atmospheric-entry
+ * (desaturation, tint, vignette; deliberately no film grain or any other per-frame noise) and composites the atmospheric-entry
  * overlay, so the orbit-to-surface cut happens behind one continuous effect.
  */
 export class PostFX {
   /** Colour grade. */
   desaturate = 0;
   vignette = 0.25;
-  grain = 0.03;
   exposure = 1;
   contrast = 1;
   readonly tint = new THREE.Color(1, 1, 1);
@@ -31,7 +30,7 @@ export class PostFX {
       depthWrite: false,
       uniforms: {
         tScene: { value: this.target.texture }, uTime: { value: 0 }, uAspect: { value: 1 },
-        uDesat: { value: 0 }, uVignette: { value: 0 }, uGrain: { value: 0 }, uExposure: { value: 1 },
+        uDesat: { value: 0 }, uVignette: { value: 0 }, uExposure: { value: 1 },
         uContrast: { value: 1 }, uTint: { value: this.tint }, uCloud: { value: 0 }, uHeat: { value: 0 },
       },
       vertexShader: /* glsl */ `
@@ -39,7 +38,7 @@ export class PostFX {
         void main() { vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }`,
       fragmentShader: /* glsl */ `
         uniform sampler2D tScene;
-        uniform float uTime, uAspect, uDesat, uVignette, uGrain, uExposure, uContrast, uCloud, uHeat;
+        uniform float uTime, uAspect, uDesat, uVignette, uExposure, uContrast, uCloud, uHeat;
         uniform vec3 uTint;
         varying vec2 vUv;
         ${NOISE_GLSL}
@@ -67,7 +66,6 @@ export class PostFX {
             c += vec3(1.0, 0.42, 0.12) * uHeat * (0.25 + streak) * smoothstep(0.15, 0.9, r);
           }
 
-          c += (hash31(vec3(gl_FragCoord.xy, uTime * 60.0)) - 0.5) * uGrain;
           gl_FragColor = vec4(pow(clamp(c, 0.0, 1.0), vec3(1.0 / 2.2)), 1.0);
         }`,
     });
@@ -86,7 +84,6 @@ export class PostFX {
     u.uTime.value = time;
     u.uDesat.value = this.desaturate;
     u.uVignette.value = this.vignette;
-    u.uGrain.value = this.grain;
     u.uExposure.value = this.exposure;
     u.uContrast.value = this.contrast;
     u.uCloud.value = this.cloud;
