@@ -1,0 +1,30 @@
+{
+  "name": "exo-colony",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Vertical slice: orbital-to-isometric colony MMO prototype (custom ECS, authoritative tick server, binary netcode, custom planetary shaders).",
+  "scripts": {
+    "build": "vite build && esbuild server/main.ts --bundle --platform=node --format=esm --packages=external --outfile=dist/server/main.mjs",
+    "start": "node dist/server/main.mjs",
+    "dev": "npm run build && npm start",
+    "dev:client": "vite",
+    "play": "npm install && npm run build && npm start",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "smoke": "esbuild scripts/smoke.ts --bundle --platform=node --format=esm --packages=external --outfile=dist/smoke.mjs && node dist/smoke.mjs"
+  },
+  "dependencies": {
+    "three": "^0.187.0",
+    "ws": "^8.23.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.6",
+    "@types/three": "^0.187.0",
+    "@types/ws": "^8.18.2",
+    "esbuild": "^0.28.2",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.8",
+    "vitest": "^5.1.0"
+  }
+}
