@@ -217,3 +217,13 @@ li { padding: 2px 0; }
 #toast.show { visibility: visible; }
 #net { position: absolute; right: 12px; bottom: 8px; text-shadow: 1px 1px 0 #000; }
 [hidden] { display: none !important; }
+
+/* Village books: market stalls, job board, ledger. */
+#village-window { min-width: 420px; max-height: 80vh; overflow-y: auto; }
+#village-body .label { margin-top: 10px; }
+.trade-row { display: grid; grid-template-columns: 12px 1fr 70px 56px 92px 92px; gap: 6px; align-items: center; padding: 2px 0; border-bottom: 1px solid #1a1915; }
+.trade-row .swatch { width: 10px; height: 10px; border: 1px solid #000; }
+.trade-row button { padding: 3px 6px; }
+.ledger { list-style: none; margin: 0; padding: 0; font-size: 11px; color: var(--dim); }
+.ledger li { padding: 1px 0; }
+.plate.hostile { border-top-color: var(--rust); }

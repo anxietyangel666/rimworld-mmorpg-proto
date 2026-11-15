@@ -2,6 +2,7 @@ import { Status } from '../game-sim/character';
 import { EntityKind, TICK_RATE } from '../game-sim/components';
 import { BUILD_ORDER, ITEMS, NODES, STRUCTURES, StructureKind } from '../game-sim/items';
 import { moveSpeed, moveStep } from '../game-sim/movement';
+import { BUILDINGS, BuildingType, PROF_NAMES, VILLAGE_OWNER, WOLF } from '../game-sim/village';
 import type { SelfState } from '../game-sim/worldSim';
 import { C2S, type EntityMirror, type MirrorEntity, type NetClient } from '../network';
 import type { IsoScene } from '../renderer-isometric';
@@ -17,6 +18,8 @@ export interface SurfaceHooks {
   onChange(): void;
   /** The player clicked a finished workstation. */
   onStation(e: MirrorEntity): void;
+  /** The player clicked the market or the town hall. */
+  onVillage(e: MirrorEntity): void;
   /** A key the HUD owns (windows, drink). Return true if handled. */
   onKey(key: string): boolean;
 }
@@ -109,6 +112,9 @@ export class SurfaceController {
       this.iso.ping(target.state.x, target.state.y);
       if (target.state.structure?.built && target.state.structure.kind !== StructureKind.GardenPlot) this.hooks.onStation(target);
     } else {
+      // Clicking a market or town hall opens its books; the hero still walks there.
+      const b = this.iso.buildingAt(Math.floor(g.x), Math.floor(g.y));
+      if (b?.state.building?.built && (b.state.building.type === BuildingType.Market || b.state.building.type === BuildingType.TownHall)) this.hooks.onVillage(b);
       this.net.send({ op: C2S.MoveTo, x: g.x, y: g.y });
       // Show the route at once from the shared pathfinder; the server's own route replaces it.
       this.iso.showPredictedRoute(this.iso.planRoute(g.x, g.y), performance.now());
@@ -155,8 +161,16 @@ export class SurfaceController {
       if (s.structure.kind === StructureKind.GardenPlot) return def.name + '\n' + ['Empty - click to plant berries', 'Sown', 'Sprouting', 'Ripe - click to harvest'][s.structure.crop];
       return def.name + '\n' + def.desc + (s.structure.kind >= StructureKind.ChoppingBlock ? '\nClick to use' : '');
     }
+    if (s.building) {
+      const def = BUILDINGS[s.building.type as BuildingType];
+      if (!s.building.built) return def.name + ' (being raised, ' + Math.round(s.building.progress) + '%)';
+      const books = s.building.type === BuildingType.Market ? '\nClick to trade' : s.building.type === BuildingType.TownHall ? '\nClick for the job board' : '';
+      return def.name + '\n' + def.desc + books;
+    }
     if (s.unit) {
       if (s.unit.hero) return s.unit.name;
+      if (s.unit.prof === WOLF) return 'Wolf\nKeep your distance';
+      if (s.unit.owner === VILLAGE_OWNER) return s.unit.name + ', ' + PROF_NAMES[s.unit.prof].toLowerCase();
       if (s.unit.owner === 0) return s.unit.name + ', a drifter\nClick to offer food and recruit';
       return s.unit.name + (s.unit.owner === this.state.playerId ? '\nClick to give orders' : '');
     }
@@ -170,7 +184,7 @@ export class SurfaceController {
     this.iso.setHover(tx, ty, this.buildKind === null);
     if (this.buildKind !== null) this.iso.setGhost(this.buildKind, tx, ty);
     if (!tooltip) return;
-    const over = this.buildKind === null ? (this.iso.unitAtScreen(this.pointer.x, this.pointer.y) ?? this.iso.entityAtTile(tx, ty)) : null;
+    const over = this.buildKind === null ? (this.iso.unitAtScreen(this.pointer.x, this.pointer.y) ?? this.iso.entityAtTile(tx, ty) ?? this.iso.buildingAt(tx, ty)) : null;
     if (over) showTooltip(this.describe(over), this.pointer.x, this.pointer.y);
     else hideTooltip();
   }

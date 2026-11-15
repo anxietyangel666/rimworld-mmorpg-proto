@@ -84,3 +84,26 @@ float cloudAt(vec3 r, float t) {
   return smoothstep(0.53, 0.8, n * band + warp * 0.26);
 }
 `;
+
+/**
+ * 2D Voronoi: distances to the nearest and second-nearest feature point. The
+ * difference between them is small along cell borders, which makes crisp
+ * ripple lines and caustic nets when thresholded.
+ */
+export const VORONOI_GLSL = /* glsl */ `
+vec2 hash22(vec2 p) {
+  vec3 q = fract(vec3(p.xyx) * vec3(0.1031, 0.1030, 0.0973));
+  q += dot(q, q.yzx + 33.33);
+  return fract((q.xx + q.yz) * q.zy);
+}
+vec2 voronoi(vec2 p) {
+  vec2 i = floor(p), f = fract(p);
+  float d1 = 8.0, d2 = 8.0;
+  for (int y = -1; y <= 1; y++) for (int x = -1; x <= 1; x++) {
+    vec2 g = vec2(float(x), float(y));
+    float d = length(g + hash22(i + g) - f);
+    if (d < d1) { d2 = d1; d1 = d; } else if (d < d2) d2 = d;
+  }
+  return vec2(d1, d2);
+}
+`;

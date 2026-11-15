@@ -3,14 +3,15 @@ import { EntityKind, ORDER_NAMES, UnitState } from '../game-sim/components';
 import { STRUCTURES, type StructureKind } from '../game-sim/items';
 import { Pathfinder } from '../game-sim/pathfinding';
 import type { MirrorEntity } from '../network/mirror';
-import { Biome } from '../world-gen/planet';
-import { CHUNK_SIZE, Surface, tileIndex, WORLD_H, WORLD_W, wrapDX, wrapDY, wrapX, wrapY } from '../world-gen/surface';
-import { blueprintEdges, makePile, makePod, makeStructure, makeUnit, type PodView, type StructureView, type UnitView } from './actors';
+import { PROF_NAMES, VILLAGE_OWNER, WOLF, type Prof } from '../game-sim/village';
+import { CHUNK_SIZE, CHUNKS_X, CHUNKS_Y, Surface, tileIndex, WORLD_H, WORLD_W, wrapDX, wrapDY, wrapX, wrapY } from '../world-gen/surface';
+import { blueprintEdges, makePile, makePod, makeStructure, makeUnit, makeWolf, type PodView, type StructureView, type UnitView } from './actors';
 import { Atmosphere, Puffs } from './atmosphere';
+import { buildRoad, makeBuilding, type BuildingView } from './buildings';
 import { TacticalOverlay } from './overlays';
 import { BOUNCE_COLOR, gradeFor, playerColor, SKY_COLOR, SUN_COLOR, type Grade } from './palette';
-import { makeBoulders, PropLayer } from './props';
-import { buildChunkGeometry, buildWater, patchGround } from './terrain';
+import { buildDecor, makeBoulders, PropLayer } from './props';
+import { buildChunkGeometry, buildWaterGeometry, makeCutUniforms, makeWaterMaterial, patchMaterial } from './terrain';
 
 /** Server ticks a drop pod takes from sky to ground. The passenger steps out shortly after (POD_DEPLOY_TICKS). */
 export const POD_FALL_TICKS = 50;
@@ -23,7 +24,14 @@ const SUN_OFFSET = new THREE.Vector3(-38, 46, 22);
 const SHADOW_MAP = 2048;
 const STATE_LABEL: Record<UnitState, string> = {
   [UnitState.Idle]: '', [UnitState.Moving]: '', [UnitState.Harvesting]: 'gathering', [UnitState.Building]: 'building', [UnitState.Crafting]: 'crafting',
+  [UnitState.Sleeping]: 'asleep', [UnitState.Eating]: 'eating', [UnitState.Fighting]: 'fighting',
 };
+
+interface Chunk {
+  group: THREE.Group;
+  /** Undergrowth and boulders, rebuilt when a road or building lands on the chunk. */
+  scatter: THREE.Object3D[];
+}
 
 interface View {
   e: MirrorEntity;
@@ -31,6 +39,12 @@ interface View {
   pod?: PodView;
   structure?: StructureView;
   pile?: THREE.Mesh;
+  building?: BuildingView;
+  road?: THREE.Mesh;
+  /** Wrapped tile indices this road or building covers: no undergrowth is drawn there. */
+  covers?: number[];
+  /** Tiles this building blocks once built. */
+  solid?: number[];
   plate?: { root: HTMLElement; hp: HTMLElement; tag: HTMLElement };
   /** Pod only: whether touchdown effects have played. */
   landed?: boolean;
@@ -68,14 +82,26 @@ export class IsoScene {
   selected = -1;
 
   private readonly views = new Map<number, View>();
-  private readonly chunks = new Map<string, THREE.Group>();
+  private readonly chunks = new Map<string, Chunk>();
   private readonly terrainMat: THREE.MeshStandardMaterial;
   private readonly props: PropLayer;
   private readonly overlay: TacticalOverlay;
   private readonly atmosphere = new Atmosphere();
   private readonly puffs = new Puffs(new THREE.Color(0.55, 0.52, 0.46));
   private readonly sun: THREE.DirectionalLight;
-  private readonly water: THREE.Mesh;
+  private readonly waterMat: THREE.ShaderMaterial;
+  private readonly decorMat: THREE.MeshStandardMaterial;
+  private readonly rockMat: THREE.MeshStandardMaterial;
+  private readonly wallMat: THREE.MeshStandardMaterial;
+  private readonly roadMat: THREE.MeshStandardMaterial;
+  private readonly hemi = new THREE.HemisphereLight(SKY_COLOR, BOUNCE_COLOR, 0.8);
+  private readonly cut = makeCutUniforms();
+  private readonly night = { value: 0 };
+  private readonly waterU = { uSunDir: { value: SUN_OFFSET.clone().normalize() }, uViewDir: { value: new THREE.Vector3() }, uNight: this.night };
+  /** Wrapped tiles under a road or building, counted so overlapping roads can come and go. */
+  private readonly covered = new Map<number, number>();
+  /** Hour of the local day, 0..24, as last reported by the server. */
+  hour = 12;
   private readonly time = { value: 0 };
   /** Tiles blocked by replicated things (nodes, pods, finished solid structures). */
   private readonly dynBlocked = new Set<number>();
@@ -99,13 +125,20 @@ export class IsoScene {
 
     this.scene.background = new THREE.Color(0.07, 0.075, 0.07);
     this.terrainMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.96, metalness: 0 });
-    patchGround(this.terrainMat, this.time, true);
-    const propMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.92, flatShading: true });
-    patchGround(propMat, this.time, false);
-    this.props = new PropLayer(propMat);
+    patchMaterial(this.terrainMat, this.time, { key: 'ground', grit: true });
+    const std = () => new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.92, flatShading: true });
+    // Only tall things are cut away: trees and walls. Rocks and undergrowth never hide anyone.
+    const plantMat = std();
+    patchMaterial(plantMat, this.time, { key: 'plant', sway: true, cut: this.cut });
+    patchMaterial((this.rockMat = std()), this.time, { key: 'rock' });
+    patchMaterial((this.decorMat = std()), this.time, { key: 'rock' });
+    patchMaterial((this.wallMat = std()), this.time, { key: 'wall', cut: this.cut, night: this.night });
+    this.roadMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.97, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 });
+    patchMaterial(this.roadMat, this.time, { key: 'ground', grit: true });
+    this.waterMat = makeWaterMaterial(this.time, this.waterU);
+    this.props = new PropLayer(plantMat, this.rockMat);
     this.overlay = new TacticalOverlay(heightAt);
-    this.water = buildWater(this.time);
-    this.scene.add(this.water, this.props.group, this.atmosphere.group, this.puffs.group, this.overlay.group);
+    this.scene.add(this.props.group, this.atmosphere.group, this.puffs.group, this.overlay.group);
 
     // Low sun for long shadows; a sky/ground hemisphere fills them so they stay readable.
     this.sun = new THREE.DirectionalLight(SUN_COLOR, 3.0);
@@ -116,7 +149,7 @@ export class IsoScene {
     this.sun.shadow.radius = 3;
     this.sun.shadow.camera.near = 1;
     this.sun.shadow.camera.far = 260;
-    this.scene.add(this.sun, this.sun.target, new THREE.HemisphereLight(SKY_COLOR, BOUNCE_COLOR, 0.8));
+    this.scene.add(this.sun, this.sun.target, this.hemi);
     // Axes of the light's view, for snapping the shadow frustum to whole shadow texels.
     const dir = SUN_OFFSET.clone().normalize();
     this.lightRight.crossVectors(new THREE.Vector3(0, 1, 0), dir).normalize();
@@ -150,7 +183,7 @@ export class IsoScene {
     if (s.kind === EntityKind.Unit && s.unit) {
       const own = s.unit.owner === this.opts.playerId;
       if (own && s.unit.hero) this.heroId = s.id;
-      view.unit = makeUnit(playerColor(s.unit.owner, own), s.unit.hero);
+      view.unit = s.unit.prof === WOLF ? makeWolf() : makeUnit(playerColor(s.unit.owner, own), s.unit.hero, s.unit.prof as Prof);
       this.scene.add(view.unit.group);
       view.plate = this.makePlate();
     } else if (s.kind === EntityKind.Pod && s.pod) {
@@ -167,6 +200,28 @@ export class IsoScene {
       view.pile.position.set(x, h, z);
       view.pile.rotation.y = (s.id * 2.4) % Math.PI;
       this.scene.add(view.pile);
+    } else if (s.kind === EntityKind.Building && s.building) {
+      const b = (view.building = makeBuilding(s.building.type, s.building.flip, this.wallMat, (fade) => this.roofMaterial(fade)));
+      const L = b.layout, ox = Math.round(s.x - L.w / 2), oy = Math.round(s.y - L.h / 2);
+      b.group.position.set(Math.round(x - L.w / 2), h, Math.round(z - L.h / 2));
+      this.scene.add(b.group);
+      view.covers = [];
+      for (let ty = 0; ty < L.h; ty++) for (let tx = 0; tx < L.w; tx++) view.covers.push(tileIndex(ox + tx, oy + ty));
+      view.solid = L.solid.map(([tx, ty]) => tileIndex(ox + tx, oy + ty));
+      this.cover(view.covers, 1);
+    } else if (s.kind === EntityKind.Road && s.road) {
+      // Road points are wrapped; unwrap each relative to the previous so a road crossing the seam stays in one piece.
+      const pts: number[] = [];
+      for (let i = 0; i < s.road.pts.length; i += 2) {
+        const px = i === 0 ? this.ux(s.road.pts[0]) : pts[i - 2] + wrapDX(s.road.pts[i] - s.road.pts[i - 2]);
+        const pz = i === 0 ? this.uz(s.road.pts[1]) : pts[i - 1] + wrapDY(s.road.pts[i + 1] - s.road.pts[i - 1]);
+        pts.push(px, pz);
+      }
+      const road = buildRoad(pts, s.road.wide, this.roadMat, (vx, vy) => this.surface.vertexHeight(vx, vy), (tx, ty) => this.surface.isWater(tx, ty));
+      view.road = road.mesh;
+      this.scene.add(road.mesh);
+      view.covers = road.tiles.map(([tx, ty]) => tileIndex(tx, ty));
+      this.cover(view.covers, 1);
     }
     this.change(e);
   }
@@ -177,20 +232,22 @@ export class IsoScene {
     if (!view) return;
     view.e = e;
     if (s.node) {
-      const arid = [Biome.Desert, Biome.Badlands].includes(this.surface.biome(s.x, s.y));
-      this.props.set(s.id, s.node.kind, this.ux(s.x), this.uz(s.y), this.surface.height(s.x, s.y), s.node.amount, arid);
+      this.props.set(s.id, s.node.kind, this.ux(s.x), this.uz(s.y), this.surface.height(s.x, s.y), s.node.amount, this.surface.treeSpecies(Math.floor(s.x), Math.floor(s.y)));
       this.dynBlocked.add(tileIndex(s.x, s.y));
     } else if (s.structure && view.structure) {
-      view.structure.setState(s.structure.progress, s.structure.built, s.structure.crop);
+      view.structure.setState(s.structure.progress, s.structure.built, s.structure.crop, s.structure.owner === VILLAGE_OWNER);
       if (s.structure.built && STRUCTURES[s.structure.kind].blocks) this.dynBlocked.add(tileIndex(s.x, s.y));
+    } else if (s.building && view.building) {
+      view.building.setProgress(s.building.progress, s.building.built);
+      if (s.building.built) for (const t of view.solid!) this.dynBlocked.add(t);
     } else if (s.pile && view.pile) {
       view.pile.scale.setScalar(Math.min(1.6, 0.7 + s.pile.qty * 0.08));
     } else if (s.unit && view.plate) {
       const u = s.unit, own = u.owner === this.opts.playerId;
-      const role = u.hero ? '' : u.owner === 0 ? 'drifter' : own ? ORDER_NAMES[u.order].toLowerCase() : this.opts.ownerName(u.owner);
+      const role = u.hero || u.prof === WOLF ? '' : u.owner === VILLAGE_OWNER ? PROF_NAMES[u.prof].toLowerCase() : u.owner === 0 ? 'drifter' : own ? ORDER_NAMES[u.order].toLowerCase() : this.opts.ownerName(u.owner);
       const doing = STATE_LABEL[u.state];
-      view.plate.tag.textContent = u.name + (role ? ' · ' + role : '') + (doing && u.hero ? ' · ' + doing : '');
-      view.plate.root.className = 'plate' + (own ? ' own' : u.owner === 0 ? ' neutral' : '');
+      view.plate.tag.textContent = u.name + (role ? ' · ' + role : '') + (doing && (u.hero || u.owner === VILLAGE_OWNER) ? ' · ' + doing : '');
+      view.plate.root.className = 'plate' + (own ? ' own' : u.prof === WOLF ? ' hostile' : u.owner === 0 || u.owner === VILLAGE_OWNER ? ' neutral' : '');
       view.plate.hp.style.width = Math.round((u.hp / u.maxHp) * 100) + '%';
       // The server's route supersedes the local prediction.
       if (s.id === this.heroId && u.path.length > 0) this.predicted = null;
@@ -208,8 +265,12 @@ export class IsoScene {
     if (view.structure) this.scene.remove(view.structure.group);
     if (view.pile) this.scene.remove(view.pile);
     view.plate?.root.remove();
+    if (view.building) this.scene.remove(view.building.group);
+    if (view.road) { this.scene.remove(view.road); view.road.geometry.dispose(); }
+    if (view.covers) this.cover(view.covers, -1);
+    for (const t of view.solid ?? []) this.dynBlocked.delete(t);
     if (s.node) this.props.delete(s.id);
-    if (s.kind !== EntityKind.Unit && s.kind !== EntityKind.Pile) this.dynBlocked.delete(tileIndex(s.x, s.y));
+    if (s.kind === EntityKind.Node || s.kind === EntityKind.Pod || s.kind === EntityKind.Structure) this.dynBlocked.delete(tileIndex(s.x, s.y));
   }
 
   private makePlate(): View['plate'] {
@@ -246,20 +307,56 @@ export class IsoScene {
       const mesh = new THREE.Mesh(buildChunkGeometry(this.surface, cx, cy), this.terrainMat);
       mesh.receiveShadow = true;
       group.add(mesh);
-      const ox = cx * CHUNK_SIZE, oy = cy * CHUNK_SIZE;
-      const boulders = makeBoulders(this.surface.chunk(cx, cy), this.props.material, (x, y) => this.surface.height(ox + x, oy + y));
-      if (boulders) group.add(boulders);
+      const waterGeo = buildWaterGeometry(this.surface, cx, cy);
+      if (waterGeo) {
+        const water = new THREE.Mesh(waterGeo, this.waterMat);
+        water.renderOrder = 1;
+        group.add(water);
+      }
       this.scene.add(group);
-      this.chunks.set(cx + ',' + cy, group);
+      const chunk: Chunk = { group, scatter: [] };
+      this.chunks.set(cx + ',' + cy, chunk);
+      this.scatter(chunk, cx, cy);
     }
-    for (const [key, group] of this.chunks) {
+    for (const [key, chunk] of this.chunks) {
       const [cx, cy] = key.split(',').map(Number);
       if (Math.max(Math.abs(cx - ccx), Math.abs(cy - ccy)) <= r + 2) continue;
-      this.scene.remove(group);
-      (group.children[0] as THREE.Mesh).geometry.dispose();
-      (group.children[1] as THREE.InstancedMesh | undefined)?.dispose();
+      this.scene.remove(chunk.group);
+      for (const o of chunk.group.children) disposeMesh(o);
       this.chunks.delete(key);
     }
+  }
+
+  /** (Re)build a chunk's undergrowth and boulders, leaving out whatever a road or building has replaced. */
+  private scatter(chunk: Chunk, cx: number, cy: number): void {
+    for (const o of chunk.scatter) { chunk.group.remove(o); disposeMesh(o); }
+    const ox = cx * CHUNK_SIZE, oy = cy * CHUNK_SIZE;
+    const heightAt = (x: number, y: number) => this.surface.height(ox + x, oy + y);
+    const skip = (lx: number, ly: number) => this.covered.has(tileIndex(ox + lx, oy + ly));
+    const data = this.surface.chunk(cx, cy);
+    chunk.scatter = [buildDecor(data, this.decorMat, heightAt, skip), makeBoulders(data, this.rockMat, heightAt, skip)].filter((o) => o !== null);
+    for (const o of chunk.scatter) chunk.group.add(o);
+  }
+
+  /** Count tiles in or out of the covered set and refresh the undergrowth of every loaded chunk they touch. */
+  private cover(tiles: number[], delta: number): void {
+    const touched = new Set<number>();
+    for (const t of tiles) {
+      const n = (this.covered.get(t) ?? 0) + delta;
+      if (n > 0) this.covered.set(t, n); else this.covered.delete(t);
+      touched.add(Math.floor((t % WORLD_W) / CHUNK_SIZE) + Math.floor(Math.floor(t / WORLD_W) / CHUNK_SIZE) * CHUNKS_X);
+    }
+    for (const [key, chunk] of this.chunks) {
+      const [cx, cy] = key.split(',').map(Number);
+      const wx = ((cx % CHUNKS_X) + CHUNKS_X) % CHUNKS_X, wy = ((cy % CHUNKS_Y) + CHUNKS_Y) % CHUNKS_Y;
+      if (touched.has(wx + wy * CHUNKS_X)) this.scatter(chunk, cx, cy);
+    }
+  }
+
+  private roofMaterial(fade: { value: number }): THREE.Material {
+    const mat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.95, flatShading: true, side: THREE.DoubleSide });
+    patchMaterial(mat, this.time, { key: 'roof', cut: this.cut, fade });
+    return mat;
   }
 
   // --- camera -----------------------------------------------------------------
@@ -395,10 +492,21 @@ export class IsoScene {
     let best: MirrorEntity | null = null;
     for (const v of this.views.values()) {
       const s = v.e.state;
-      if (s.kind === EntityKind.Unit || Math.floor(s.x) !== tx || Math.floor(s.y) !== ty) continue;
+      if (s.kind === EntityKind.Unit || s.kind === EntityKind.Road || s.kind === EntityKind.Building || Math.floor(s.x) !== tx || Math.floor(s.y) !== ty) continue;
       if (!best || s.kind === EntityKind.Pile) best = v.e;
     }
     return best;
+  }
+
+  /** The village building whose footprint covers a tile. */
+  buildingAt(tx: number, ty: number): MirrorEntity | null {
+    for (const v of this.views.values()) {
+      if (!v.building) continue;
+      const L = v.building.layout, s = v.e.state;
+      const lx = wrapDX(tx + 0.5 - s.x) + L.w / 2, ly = wrapDY(ty + 0.5 - s.y) + L.h / 2;
+      if (lx >= 0 && ly >= 0 && lx < L.w && ly < L.h) return v.e;
+    }
+    return null;
   }
 
   /** Closest person other than the hero within `radiusPx` of a screen point. */
@@ -444,8 +552,20 @@ export class IsoScene {
     this.streamChunks(viewRadius);
     this.time.value = time;
     this.props.flush();
-    this.water.position.x = Math.round(this.target.x);
-    this.water.position.z = Math.round(this.target.z);
+    this.applyDaylight(dt);
+    this.camera.getWorldDirection(this.waterU.uViewDir.value);
+    const hero = this.views.get(this.heroId)?.e;
+    // Cut-aways: the hero first, then the player's own people, as far as the uniform array goes.
+    this.cut.uCutR.value = ((this.height * this.dpr) / this.viewSize) * 1.5;
+    let cuts = 0;
+    const track = (e: MirrorEntity) => {
+      if (cuts >= this.cut.uCut.value.length) return;
+      const v = this.tmp.set(this.ux(e.rx), this.surface.height(e.rx, e.ry) + 0.8, this.uz(e.ry)).project(this.camera);
+      this.cut.uCut.value[cuts++].set((v.x * 0.5 + 0.5) * this.width * this.dpr, (v.y * 0.5 + 0.5) * this.height * this.dpr, v.z * 0.5 + 0.5);
+    };
+    if (hero) track(hero);
+    for (const [id, v] of this.views) if (id !== this.heroId && v.e.state.unit?.owner === this.opts.playerId) track(v.e);
+    this.cut.uCutN.value = this.intro >= 0 ? 0 : cuts;
     const platesVisible = this.intro < 0 || this.intro > 0.85;
 
     for (const [id, view] of this.views) {
@@ -479,6 +599,18 @@ export class IsoScene {
           this.puffs.burst(view.pod.group.position.x, view.pod.group.position.y, view.pod.group.position.z);
         }
       } else if (view.structure) view.structure.animate(time);
+      else if (view.building?.roof) {
+        // Lift the roof off whatever building the hero is standing in.
+        const b = view.building, L = b.layout, roof = view.building.roof;
+        let inside = false;
+        if (hero) {
+          const lx = Math.floor(wrapDX(hero.rx - s.x) + L.w / 2), ly = Math.floor(wrapDY(hero.ry - s.y) + L.h / 2);
+          inside = lx >= 0 && ly >= 0 && lx < L.w && ly < L.h && L.inside[lx + ly * L.w];
+        }
+        b.fade.value = THREE.MathUtils.clamp(b.fade.value + (inside ? -dt : dt) * 4, 0, 1);
+        roof.visible = b.fade.value > 0.01 && (b.built || (s.building?.progress ?? 0) >= 93);
+        roof.castShadow = !inside;
+      }
     }
 
     // The air takes its colour from the climate under the camera, eased so biome borders blend.
@@ -497,6 +629,18 @@ export class IsoScene {
     this.atmosphere.update(time, this.target, this.height / this.viewSize);
   }
 
+  /** Sun, sky fill and the night factor from the hour of day. Lamps and windows glow as it gets dark. */
+  private applyDaylight(dt: number): void {
+    const h = this.hour;
+    const day = THREE.MathUtils.smoothstep(h, 5, 7.5) * (1 - THREE.MathUtils.smoothstep(h, 18.5, 21));
+    this.night.value += (1 - day - this.night.value) * (1 - Math.exp(-dt * 2));
+    const n = this.night.value;
+    this.sun.intensity = 3.0 * (1 - n * 0.9);
+    this.hemi.intensity = 0.8 - n * 0.45;
+    this.sun.color.copy(SUN_COLOR).lerp(NIGHT_SUN, n);
+    this.hemi.color.copy(SKY_COLOR).lerp(NIGHT_SKY, n);
+  }
+
   dispose(): void {
     for (const v of this.views.values()) v.plate?.root.remove();
     this.views.clear();
@@ -506,3 +650,9 @@ export class IsoScene {
 }
 
 const GRADE_SCRATCH: Grade = { haze: new THREE.Color(), hazeAmount: 0, tint: new THREE.Color(), desaturate: 0 };
+const NIGHT_SUN = new THREE.Color(0.45, 0.55, 0.8), NIGHT_SKY = new THREE.Color(0.2, 0.26, 0.42);
+
+function disposeMesh(o: THREE.Object3D): void {
+  if ((o as THREE.InstancedMesh).isInstancedMesh) (o as THREE.InstancedMesh).dispose();
+  else (o as THREE.Mesh).geometry?.dispose();
+}

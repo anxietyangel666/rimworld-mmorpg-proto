@@ -8,6 +8,7 @@ import { IsoScene } from '../renderer-isometric';
 import { OrbitScene } from '../renderer-orbit';
 import { BIOME_NAMES, generateSolarSystem, sectorInfo, sectorOfTile, WORLD_H, WORLD_W, type SolarSystem } from '../world-gen';
 import { CraftingUI } from './craftingUi';
+import { VillageUI } from './villageUi';
 import { InventoryUI } from './inventoryUi';
 import { $, el, hideTooltip, newGameState } from './state';
 import { SurfaceController } from './surface';
@@ -60,6 +61,7 @@ const net = new NetClient((location.protocol === 'https:' ? 'wss://' : 'ws://') 
 const send = net.send.bind(net);
 const inventoryUi = new InventoryUI(state, send);
 const craftingUi = new CraftingUI(state, send);
+const villageUi = new VillageUI(state, send);
 
 // --- boot --------------------------------------------------------------------
 
@@ -125,12 +127,14 @@ function onMessage(m: ServerMsg): void {
       break;
     case S2C.Self:
       state.self = m.self;
+      if (iso) iso.hour = m.self.hour;
       surface?.onSelf(m.self);
       break;
     case S2C.Inventory:
       state.inventory.items = m.items;
       inventoryUi.invalidate();
       craftingUi.invalidate();
+      villageUi.requery();
       refreshBuildBar();
       break;
     case S2C.Skills:
@@ -141,6 +145,9 @@ function onMessage(m: ServerMsg): void {
       state.craft = m.session;
       craftingUi.invalidate();
       if (m.session && !craftingUi.open) craftingUi.toggle(true);
+      break;
+    case S2C.Village:
+      villageUi.show(m.info);
       break;
     case S2C.Roster:
       roster = m.players;
@@ -192,6 +199,7 @@ function beginSurface(m: Landed): void {
   surface = new SurfaceController(iso, net, mirror!, state, {
     onChange: () => { refreshBuildBar(); refreshFollower(); },
     onStation: (e) => craftingUi.toggle(true, e),
+    onVillage: (e) => net.send({ op: C2S.VillageInfo, building: e.state.id }),
     onKey: hudKey,
   });
   setMode('surface');
@@ -204,6 +212,7 @@ function leaveSurface(): void {
   net.send({ op: C2S.Leave });
   inventoryUi.toggle(false);
   craftingUi.toggle(false);
+  villageUi.close();
   setMode('ascent');
 }
 $('leave').addEventListener('click', leaveSurface);
@@ -224,7 +233,7 @@ function hudKey(k: string): boolean {
   if (k === 'tab' || k === 'i' || k === 'c') inventoryUi.toggle();
   else if (k === 'k') craftingUi.toggle();
   else if (k === 'f') net.send({ op: C2S.Drink });
-  else if (k === 'escape' && (inventoryUi.open || craftingUi.open)) { inventoryUi.toggle(false); craftingUi.toggle(false); }
+  else if (k === 'escape' && (inventoryUi.open || craftingUi.open || villageUi.open)) { inventoryUi.toggle(false); craftingUi.toggle(false); villageUi.close(); }
   else return false;
   surface?.releaseKeys();
   return true;
@@ -233,7 +242,9 @@ $('btn-char').addEventListener('click', () => inventoryUi.toggle());
 $('btn-craft').addEventListener('click', () => craftingUi.toggle());
 $('btn-drink').addEventListener('click', () => net.send({ op: C2S.Drink }));
 document.querySelectorAll<HTMLElement>('[data-close]').forEach((b) => b.addEventListener('click', () => {
-  if (b.dataset.close === 'char-window') inventoryUi.toggle(false); else craftingUi.toggle(false);
+  if (b.dataset.close === 'char-window') inventoryUi.toggle(false);
+  else if (b.dataset.close === 'village-window') villageUi.close();
+  else craftingUi.toggle(false);
 }));
 
 function refreshSectorPanel(): void {
@@ -301,6 +312,7 @@ function refreshFollower(): void {
 
 const WORK_LABELS: Record<UnitState, string> = {
   [UnitState.Idle]: '', [UnitState.Moving]: '', [UnitState.Harvesting]: 'Gathering', [UnitState.Building]: 'Building', [UnitState.Crafting]: 'Working',
+  [UnitState.Sleeping]: 'Sleeping', [UnitState.Eating]: 'Eating', [UnitState.Fighting]: 'Fighting',
 };
 
 /** Vitals, location and the work bar; cheap enough to run a few times a second. */

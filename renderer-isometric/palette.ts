@@ -16,6 +16,8 @@ TILE_COLORS[TileType.Water] = c(0.2, 0.25, 0.25);
 TILE_COLORS[TileType.Gravel] = c(0.46, 0.44, 0.4);
 TILE_COLORS[TileType.Steppe] = c(0.45, 0.43, 0.27);
 TILE_COLORS[TileType.RedEarth] = c(0.43, 0.34, 0.28);
+TILE_COLORS[TileType.Clay] = c(0.5, 0.36, 0.29);
+TILE_COLORS[TileType.Soil] = c(0.27, 0.24, 0.17);
 
 export const SUN_COLOR = c(1.0, 0.93, 0.82);
 export const SKY_COLOR = c(0.62, 0.7, 0.8);
