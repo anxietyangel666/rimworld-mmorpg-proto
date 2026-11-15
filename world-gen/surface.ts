@@ -19,6 +19,8 @@ export const WORLD_H = SECTOR_ROWS * SECTOR_TILES;
 export const CHUNK_SIZE = 16;
 export const CHUNKS_X = WORLD_W / CHUNK_SIZE;
 export const CHUNKS_Y = WORLD_H / CHUNK_SIZE;
+/** Height of the water surface; ground below it is under water. */
+export const WATER_LEVEL = -0.2;
 
 export const wrapX = (x: number) => ((x % WORLD_W) + WORLD_W) % WORLD_W;
 export const wrapY = (y: number) => ((y % WORLD_H) + WORLD_H) % WORLD_H;
@@ -44,11 +46,15 @@ export function sectorOfTile(x: number, y: number): number {
   return Math.floor(wrapX(x) / SECTOR_TILES) + Math.floor(wrapY(y) / SECTOR_TILES) * SECTOR_COLS;
 }
 
-export enum TileType { Dirt, Grass, Sand, Rock, Snow, Water, Gravel, Steppe, RedEarth }
+export enum TileType { Dirt, Grass, Sand, Rock, Snow, Water, Gravel, Steppe, RedEarth, Clay, Soil }
 export enum NodeKind { Tree, Stone, Ore, Clay, Bush, Reeds }
+/** Client-side dressing: never blocks, never replicated. */
+export enum DecorKind { Fern, Mushroom, FallenLog, Pebbles, Tuft, Flower }
+export enum TreeSpecies { Pine, Oak, Birch, Snag }
 
 export interface PropSpawn { x: number; y: number; scale: number; rot: number }
 export interface NodeSpawn { kind: NodeKind; x: number; y: number }
+export interface DecorSpawn { kind: DecorKind; x: number; y: number; scale: number; rot: number }
 
 export interface ChunkData {
   cx: number;
@@ -60,7 +66,10 @@ export interface ChunkData {
   heights: Float32Array;
   /** 1 where the terrain itself is impassable (boulders). Water is wadeable, not blocked. */
   blocked: Uint8Array;
+  /** Chunk-local positions. */
   boulders: PropSpawn[];
+  decor: DecorSpawn[];
+  /** World positions. */
   nodes: NodeSpawn[];
 }
 
@@ -150,10 +159,21 @@ const NODE_DENSITY: Record<Biome, number[]> = {
   [Biome.Ocean]: [0.004, 0.006, 0, 0.004, 0.004, 0.01],
   [Biome.Ice]: [0, 0.006, 0.002, 0, 0, 0],
   [Biome.Tundra]: [0.02, 0.014, 0.006, 0.002, 0.008, 0.004],
-  [Biome.Forest]: [0.15, 0.01, 0.004, 0.004, 0.022, 0.008],
-  [Biome.Grassland]: [0.035, 0.01, 0.004, 0.004, 0.022, 0.016],
+  [Biome.Forest]: [0.17, 0.012, 0.004, 0.004, 0.028, 0.008],
+  [Biome.Grassland]: [0.035, 0.012, 0.004, 0.004, 0.022, 0.016],
   [Biome.Desert]: [0.006, 0.016, 0.006, 0.002, 0.005, 0.002],
   [Biome.Badlands]: [0.008, 0.022, 0.012, 0.003, 0.005, 0.002],
+};
+
+/** [fern, mushroom, fallen log, pebbles, tuft, flower] chance per empty tile. */
+const DECOR_DENSITY: Record<Biome, number[]> = {
+  [Biome.Ocean]: [0, 0, 0, 0.03, 0.02, 0],
+  [Biome.Ice]: [0, 0, 0, 0.01, 0, 0],
+  [Biome.Tundra]: [0.005, 0.004, 0.003, 0.03, 0.03, 0.004],
+  [Biome.Forest]: [0.1, 0.03, 0.012, 0.02, 0.07, 0.015],
+  [Biome.Grassland]: [0.012, 0.006, 0.002, 0.02, 0.12, 0.04],
+  [Biome.Desert]: [0, 0, 0.002, 0.05, 0.015, 0],
+  [Biome.Badlands]: [0, 0, 0.003, 0.06, 0.012, 0],
 };
 
 const BIOME_TILES: Record<Biome, [TileType, TileType]> = {
@@ -166,6 +186,9 @@ const BIOME_TILES: Record<Biome, [TileType, TileType]> = {
   [Biome.Badlands]: [TileType.RedEarth, TileType.Gravel],
 };
 
+/** Height of one terrace step in hill country. */
+const TERRACE = 0.7;
+
 /**
  * Chunk generator and cache for one world seed. The server keeps every chunk
  * it has touched; clients pass `maxChunks` so terrain far behind the player is
@@ -175,6 +198,8 @@ export class Surface {
   private readonly cache = new Map<number, ChunkData>();
   private readonly field: ClimateField;
   private readonly c: Climate = { elevation: 0, moisture: 0, temperature: 0 };
+  /** Sea component of the last land() call, for telling beaches from river banks. */
+  private sea = 0;
 
   constructor(readonly seed: number, private readonly maxChunks = Infinity) {
     this.field = new ClimateField(seed);
@@ -188,22 +213,37 @@ export class Surface {
   /**
    * Signed "landness": negative under water, rising to ~1 on dry ground. Seas
    * come from planetary elevation, lakes from a local basin field in wet
-   * climates; frozen regions are solid ice.
+   * climates, and rivers follow the zero contours of a slow noise field, which
+   * gives long meandering channels. Frozen regions are solid ice.
    */
   private land(x: number, y: number, c: Climate): number {
     const sea = c.elevation * 26 + pfbm(x, y, 128, 2, this.seed + 12) * 0.35;
     const lake = (pfbm(x, y, 32, 3, this.seed + 11) + 0.52 - c.moisture * 0.26) * 7;
-    const v = Math.min(sea, lake);
+    // Rivers dry up in arid country.
+    const river = (Math.abs(pfbm(x, y, 8, 3, this.seed + 13)) - 0.013) * 60 + Math.max(0, 0.36 - c.moisture) * 30;
+    this.sea = sea;
+    const v = Math.min(sea, lake, river);
     const frozen = smooth(0.18, 0.13, c.temperature);
     return v + (Math.max(v, 1) - v) * frozen;
+  }
+
+  /** Landness at a position without generating its chunk; cheap enough for site surveys. */
+  landness(x: number, y: number): number {
+    return this.land(x, y, this.field.at(x, y, this.c));
   }
 
   private heightRaw(x: number, y: number): number {
     const c = this.field.at(x, y, this.c);
     const land = this.land(x, y, c);
     const amp = 0.5 + Math.min(1, Math.max(0, c.elevation)) * 2.4;
-    const h = (pfbm(x, y, 32, 4, this.seed + 1) * 0.5 + 0.5) * amp + pfbm(x, y, 256, 2, this.seed + 2) * 0.1;
-    return h * smooth(0, 0.9, land) - 0.5 * (1 - smooth(-0.7, 0.1, land));
+    // Broad hills, mid-scale knolls and a fine micro-relief octave.
+    let h = (pfbm(x, y, 32, 4, this.seed + 1) * 0.5 + 0.5) * amp + pfbm(x, y, 256, 2, this.seed + 2) * 0.1 + pfbm(x, y, 512, 2, this.seed + 6) * 0.04;
+    if (amp > 1) {
+      // Hill country steps up in terraces: flat benches joined by short, steep risers.
+      const t = h / TERRACE, f = Math.floor(t);
+      h += ((f + smooth(0.32, 0.68, t - f)) * TERRACE - h) * smooth(1, 1.7, amp);
+    }
+    return h * smooth(0, 0.9, land) - 0.55 * (1 - smooth(-0.8, 0.1, land));
   }
 
   chunk(cx: number, cy: number): ChunkData {
@@ -225,7 +265,7 @@ export class Surface {
     const n = CHUNK_SIZE, s = this.seed;
     const tiles = new Uint8Array(n * n), biomes = new Uint8Array(n * n), blocked = new Uint8Array(n * n);
     const heights = new Float32Array((n + 1) * (n + 1));
-    const boulders: PropSpawn[] = [], nodes: NodeSpawn[] = [];
+    const boulders: PropSpawn[] = [], nodes: NodeSpawn[] = [], decor: DecorSpawn[] = [];
     const ox = cx * n, oy = cy * n;
     for (let j = 0; j <= n; j++) for (let i = 0; i <= n; i++) heights[i + j * (n + 1)] = this.heightRaw(ox + i, oy + j);
 
@@ -233,6 +273,7 @@ export class Surface {
       const tx = ox + i, ty = oy + j, x = tx + 0.5, y = ty + 0.5, k = i + j * n;
       const c = this.field.at(x, y, this.c);
       const land = this.land(x, y, c);
+      const sea = this.sea;
       // Jitter the climate a little so biome borders wander instead of following lattice lines.
       c.moisture += pfbm(x, y, 128, 2, s + 21) * 0.05;
       c.temperature += pfbm(x, y, 128, 2, s + 22) * 0.03;
@@ -243,12 +284,16 @@ export class Surface {
       const patch = pfbm(x, y, 64, 3, s + 4);
       const [base, alt] = BIOME_TILES[biome];
       const snowy = base === TileType.Snow;
-      tiles[k] = rocky < 0.035 && biome !== Biome.Ice ? TileType.Rock : patch > 0.1 ? alt : base;
-      const shore = land < 0.45;
-      if (shore && !snowy) tiles[k] = TileType.Sand;
+      const outcrop = rocky < 0.045 && biome !== Biome.Ice;
+      const fertile = !outcrop && (biome === Biome.Forest || biome === Biome.Grassland) && pfbm(x, y, 96, 2, s + 7) > 0.2;
+      tiles[k] = outcrop ? TileType.Rock : fertile ? TileType.Soil : patch > 0.1 ? alt : base;
+      // Sea coasts get broad sand beaches; river and lake banks are narrower and often clay.
+      const shore = land < 0.45, beach = sea < 1.5;
+      const clayBank = shore && !beach && pfbm(x, y, 96, 2, s + 8) > 0.05;
+      if ((shore || beach) && !snowy) tiles[k] = clayBank ? TileType.Clay : TileType.Sand;
 
       const r = hash01(s, tx, ty);
-      if (r < 0.006 + (rocky < 0.06 ? 0.05 : 0) && !shore) {
+      if (r < 0.006 + (rocky < 0.07 ? 0.07 : 0) && !shore) {
         blocked[k] = 1;
         boulders.push({ x: i + 0.5, y: j + 0.5, scale: 0.6 + hash01(s, tx, ty, 1) * 0.9, rot: hash01(s, tx, ty, 2) * 6.28 });
         continue;
@@ -259,15 +304,27 @@ export class Surface {
       const wet = shore ? 6 : 1;
       const weights = [
         shore ? 0 : d[0] * (0.08 + grove * 1.5), d[1] * (rocky < 0.1 ? 4 : 1), d[2] * (rocky < 0.08 ? 8 : 0.5),
-        d[3] * wet, shore ? 0 : d[4] * (0.4 + grove), d[5] * wet,
+        d[3] * (clayBank ? 30 : wet), shore ? 0 : d[4] * (0.4 + grove) * (fertile ? 2 : 1), d[5] * wet,
       ];
-      let roll = hash01(s, tx, ty, 3);
+      let roll = hash01(s, tx, ty, 3), placed = false;
       for (let kind = 0; kind < weights.length; kind++) {
-        if (roll < weights[kind]) { nodes.push({ kind, x: tx + 0.5, y: ty + 0.5 }); break; }
+        if (roll < weights[kind]) { nodes.push({ kind, x: tx + 0.5, y: ty + 0.5 }); placed = true; break; }
         roll -= weights[kind];
       }
+      if (placed) continue;
+      // Undergrowth thickens inside groves and thins out on open ground.
+      const dd = DECOR_DENSITY[biome];
+      let droll = hash01(s, tx, ty, 9);
+      for (let kind = 0; kind < dd.length; kind++) {
+        const w = dd[kind] * (kind <= DecorKind.FallenLog ? 0.3 + grove * 1.4 : 1) * (shore && kind !== DecorKind.Pebbles ? 0.2 : 1);
+        if (droll < w) {
+          decor.push({ kind, x: i + 0.15 + hash01(s, tx, ty, 10) * 0.7, y: j + 0.15 + hash01(s, tx, ty, 11) * 0.7, scale: 0.7 + hash01(s, tx, ty, 12) * 0.6, rot: hash01(s, tx, ty, 13) * 6.28 });
+          break;
+        }
+        droll -= w;
+      }
     }
-    return { cx, cy, tiles, biomes, heights, blocked, boulders, nodes };
+    return { cx, cy, tiles, biomes, heights, blocked, boulders, decor, nodes };
   }
 
   private cell(tx: number, ty: number): [ChunkData, number] {
@@ -293,6 +350,17 @@ export class Surface {
   terrainBlocked(tx: number, ty: number): boolean {
     const [d, k] = this.cell(tx, ty);
     return d.blocked[k] === 1;
+  }
+
+  /** Which kind of tree grows on a tile: conifers in the cold, broadleaf mixes where it is mild, snags where it is dry. */
+  treeSpecies(tx: number, ty: number): TreeSpecies {
+    const biome = this.biome(tx, ty);
+    if (biome === Biome.Desert || biome === Biome.Badlands) return TreeSpecies.Snag;
+    const t = this.field.at(tx, ty, this.c).temperature;
+    // A slow field makes stands of one species rather than salt-and-pepper mixing.
+    const stand = pfbm(tx, ty, 48, 2, this.seed + 31) * 0.5 + hash01(this.seed, Math.floor(tx), Math.floor(ty), 32) * 0.35;
+    if (t < 0.42 || stand < -0.02) return TreeSpecies.Pine;
+    return stand > 0.24 ? TreeSpecies.Birch : TreeSpecies.Oak;
   }
 
   /** Height of the vertex at integer tile corner (vx, vy). */

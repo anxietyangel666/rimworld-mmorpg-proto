@@ -11,9 +11,10 @@ export enum Item {
   AxeHead, KnifeBlade, ShovelHead, FlintAxe, FlintKnife, FlintShovel, StonePick, CopperAxe, CopperPick,
   RawPot, ClayPot, WaterPot, RawCrucible, Crucible,
   Shirt, Trousers, GrassHat, HandWraps, Pouch, Basket,
+  Grain, Bread, Nails, Spear, Meat,
 }
 
-export type ToolType = 'axe' | 'knife' | 'shovel' | 'pick' | 'hammer' | 'crucible';
+export type ToolType = 'axe' | 'knife' | 'shovel' | 'pick' | 'hammer' | 'crucible' | 'spear';
 export enum Slot { Head, Torso, Legs, Hands, Back, Belt }
 export const SLOT_NAMES = ['Head', 'Torso', 'Legs', 'Hands', 'Back', 'Belt'];
 
@@ -76,6 +77,11 @@ export const ITEMS: Record<Item, ItemDef> = {
   [Item.HandWraps]: d('Hand wraps', 1, 1, 0.1, 1, 'coil', '#9a927e', 'Protects hands when working stone.', { slot: Slot.Hands, warmth: 1 }),
   [Item.Pouch]: d('Belt pouch', 2, 2, 0.3, 1, 'bag', '#7a6a4a', 'Wear on the belt for a 3x2 pouch.', { slot: Slot.Belt, grid: [3, 2] }),
   [Item.Basket]: d('Pack basket', 3, 3, 1.2, 1, 'bag', '#9a8450', 'Wear on the back for a 5x5 pack.', { slot: Slot.Back, grid: [5, 5] }),
+  [Item.Grain]: d('Grain', 1, 1, 0.2, 12, 'fiber', '#c9a94e', 'Threshed grain. Seed for a plot, or flour for the baker.'),
+  [Item.Bread]: d('Bread', 1, 1, 0.3, 6, 'lump', '#b98a4a', 'A village loaf. Filling.', { food: { satiety: 30, hydration: 0 } }),
+  [Item.Nails]: d('Nails', 1, 1, 0.05, 30, 'fiber', '#8d8f94', 'Copper nails. Every timber frame needs them.'),
+  [Item.Spear]: d('Spear', 1, 4, 1.5, 1, 'knife', '#6b6f77', 'Keeps a wolf at a distance.', { tool: { type: 'spear', tier: 1, dur: 80 } }),
+  [Item.Meat]: d('Wolf meat', 1, 1, 0.5, 4, 'lump', '#8f3d3a', 'Tough, but it is food.', { food: { satiety: 22, hydration: 2 } }),
 };
 
 // --- skills ---------------------------------------------------------------------
@@ -114,7 +120,7 @@ export const NODES: Record<NodeKind, NodeDef> = {
 
 // --- structures -----------------------------------------------------------------
 
-export enum StructureKind { Wall, Floor, Campfire, ChoppingBlock, CraftingTable, PitKiln, Forge, GardenPlot }
+export enum StructureKind { Wall, Floor, Campfire, ChoppingBlock, CraftingTable, PitKiln, Forge, GardenPlot, Well }
 
 export interface Cost { item: Item; qty: number }
 export interface StructureDef { name: string; cost: Cost[]; blocks: boolean; tool?: ToolType; desc: string }
@@ -128,6 +134,7 @@ export const STRUCTURES: Record<StructureKind, StructureDef> = {
   [StructureKind.Wall]: { name: 'Log wall', cost: [{ item: Item.Log, qty: 1 }], blocks: true, desc: 'A solid wall segment.' },
   [StructureKind.Floor]: { name: 'Stone floor', cost: [{ item: Item.Stone, qty: 2 }], blocks: false, desc: 'Paving.' },
   [StructureKind.GardenPlot]: { name: 'Garden plot', cost: [], blocks: false, tool: 'shovel', desc: 'Plant berries; harvest when ripe.' },
+  [StructureKind.Well]: { name: 'Well', cost: [], blocks: true, desc: 'Village well. Drink here, or draw water for crops.' },
 };
 export const BUILD_ORDER = [
   StructureKind.Campfire, StructureKind.ChoppingBlock, StructureKind.CraftingTable, StructureKind.PitKiln,
@@ -202,6 +209,7 @@ export const RECIPES: Recipe[] = [
   r('Haft flint axe', null, [[Item.AxeHead, 1], [Item.Stick, 1], [Item.Cordage, 1]], Item.FlintAxe, 1, 5, Skill.Knapping, 10),
   r('Haft flint knife', null, [[Item.KnifeBlade, 1], [Item.Stick, 1], [Item.Cordage, 1]], Item.FlintKnife, 1, 4, Skill.Knapping, 8),
   r('Haft flint shovel', null, [[Item.ShovelHead, 1], [Item.Stick, 1], [Item.Cordage, 1]], Item.FlintShovel, 1, 5, Skill.Knapping, 10),
+  r('Haft spear', null, [[Item.KnifeBlade, 1], [Item.Stick, 2], [Item.Cordage, 1]], Item.Spear, 1, 5, Skill.Knapping, 10),
   r('Split firewood', StructureKind.ChoppingBlock, [[Item.Log, 1]], Item.Firewood, 4, 5, Skill.Carpentry, 6, 'axe'),
   r('Hew planks', StructureKind.ChoppingBlock, [[Item.Log, 1]], Item.Plank, 2, 7, Skill.Carpentry, 8, 'axe'),
   r('Stone pick', StructureKind.CraftingTable, [[Item.Stone, 2], [Item.Stick, 1], [Item.Cordage, 1]], Item.StonePick, 1, 6, Skill.Knapping, 10),

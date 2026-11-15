@@ -10,6 +10,7 @@ import { carryCapacity, loadTier, LoadTier, newSkills, newVitals, Status, tickVi
 import {
   AOI_RADIUS, BUILD_RATE, Char, CROP_RIPE, CROP_SPROUT, CropStage, EntityKind, Follower, Inv, Job, JobKind, Net, Node,
   NPC_SPEED, Order, Path, Pile, Pod, POD_DEPLOY_TICKS, Position, RECRUIT_BERRIES, SITE_RADIUS, Structure, TICK_RATE, Unit,
+  Building, DAY_START_HOUR, DAY_TICKS, Wolf,
   UnitState, type CharData, type JobData, type UnitData,
 } from './components';
 import {
@@ -22,6 +23,8 @@ import {
 } from './items';
 import { moveSpeed, moveStep } from './movement';
 import { Pathfinder } from './pathfinding';
+import { BuildingType, layoutOf } from './village';
+import { VillageSystem } from './villageSim';
 
 export type Command =
   | { type: 'moveTo'; player: number; x: number; y: number }
@@ -35,13 +38,18 @@ export type Command =
   | { type: 'craftCancel'; player: number }
   | { type: 'recipe'; player: number; recipe: number; station: Entity }
   | { type: 'order'; player: number; npc: Entity; order: Order }
-  | { type: 'drink'; player: number };
+  | { type: 'drink'; player: number }
+  | { type: 'trade'; player: number; building: Entity; item: Item; qty: number; sell: boolean }
+  | { type: 'contract'; player: number; building: Entity; id: number; deliver: boolean };
 
 /** What a client is told about its own character every snapshot. */
 export interface SelfState {
   ack: number; x: number; y: number;
   hp: number; satiety: number; hydration: number; stamina: number; temp: number; status: number;
   kg: number; capacity: number; tier: LoadTier; work: number; ambient: number;
+  coins: number;
+  /** Time of day, 0..24. */
+  hour: number;
 }
 
 const DRIFTER_NAMES = ['Aldo', 'Bren', 'Cora', 'Dell', 'Edda', 'Finn', 'Gus', 'Hale', 'Ida', 'Jory', 'Kit', 'Lena', 'Moss', 'Nell', 'Odo', 'Pia', 'Rook', 'Sela', 'Tam', 'Una', 'Wren'];
@@ -74,24 +82,28 @@ export class WorldSim {
   /** Terrain obstacles plus nodes, pods and finished blocking structures, for generated chunks. */
   private readonly blocked = new Uint8Array(WORLD_W * WORLD_H);
   private readonly generated = new Uint8Array(CHUNKS_X * CHUNKS_Y);
-  private readonly pf: Pathfinder;
-  private readonly rng: Rng;
+  /** Tiles a village has levelled: boulders there no longer block. */
+  private readonly cleared = new Set<number>();
+  readonly villages: VillageSystem;
+  readonly pf: Pathfinder;
+  readonly rng: Rng;
   private readonly queue: Command[] = [];
   /** Tile -> node, pod or structure standing on it. */
-  private readonly occupant = new Map<number, Entity>();
+  readonly occupant = new Map<number, Entity>();
   private readonly piles = new Map<number, Entity>();
   /** Tiles whose natural node has been used up, and partial amounts of ones put away half-harvested. */
-  private readonly depleted = new Set<number>();
+  readonly depleted = new Set<number>();
   private readonly nodeAmounts = new Map<number, number>();
   private readonly active = new Map<number, { nodes: Entity[]; idle: number }>();
   private readonly populated = new Set<number>();
-  private readonly crops = new Set<Entity>();
+  readonly crops = new Set<Entity>();
   private readonly fires = new Set<Entity>();
   private readonly names = new Map<number, string>();
 
   constructor(readonly seed: number) {
     this.surface = new Surface(seed);
     this.pf = new Pathfinder(WORLD_W, WORLD_H, (tx, ty) => this.blockedAt(tx, ty), true);
+    this.villages = new VillageSystem(this);
     this.rng = new Rng(hashInts(seed, 0x10ad));
     this.world.onDestroy = (e) => this.grid.remove(e);
     const sys = (name: string, update: (dt: number) => void) => this.world.addSystem({ name, update: (_w, dt) => update(dt) });
@@ -100,6 +112,7 @@ export class WorldSim {
     sys('streaming', () => { if (this.tick % 10 === 0) this.runStreaming(); });
     sys('heroInput', (dt) => this.runHeroInput(dt));
     sys('followers', () => this.runFollowers());
+    sys('villages', (dt) => this.villages.update(dt));
     sys('jobs', (dt) => this.runJobs(dt));
     sys('movement', (dt) => this.runMovement(dt));
     sys('crops', (dt) => this.runCrops(dt));
@@ -108,6 +121,50 @@ export class WorldSim {
 
   get tick(): number {
     return this.world.tick;
+  }
+
+  /** Time of day, 0..24. */
+  get hour(): number {
+    return ((this.world.tick / DAY_TICKS) * 24 + DAY_START_HOUR) % 24;
+  }
+
+  setBlocked(tx: number, ty: number, on: boolean): void {
+    this.blockedAt(tx, ty);
+    this.blocked[tileIndex(tx, ty)] = on ? 1 : 0;
+  }
+
+  /** Remove the resource node on a tile for good, as when ground is cleared for a settlement. */
+  clearNode(tx: number, ty: number): void {
+    const idx = tileIndex(tx, ty);
+    this.depleted.add(idx);
+    this.nodeAmounts.delete(idx);
+    const e = this.occupant.get(idx);
+    if (e !== undefined && this.world.has(e, Node)) {
+      this.occupant.delete(idx);
+      this.world.remove(e, Node);
+      this.world.destroy(e);
+      this.blocked[idx] = 0;
+    } else if (e === undefined && this.generated[Math.floor(wrapX(tx) / CHUNK_SIZE) + Math.floor(wrapY(ty) / CHUNK_SIZE) * CHUNKS_X]) {
+      this.blocked[idx] = this.surface.terrainBlocked(tx, ty) && !this.cleared.has(idx) ? 1 : 0;
+    }
+  }
+
+  /** Level a tile completely: no node, and any boulder is hauled away. Clients learn of it from what is built there. */
+  clearTile(tx: number, ty: number): void {
+    const idx = tileIndex(tx, ty);
+    this.cleared.add(idx);
+    this.clearNode(tx, ty);
+    if (!this.occupant.has(idx)) this.blocked[idx] = 0;
+  }
+
+  /** Place a finished structure directly, for things a village is founded with. */
+  spawnStructure(kind: StructureKind, tx: number, ty: number, owner: number): Entity {
+    tx = wrapX(Math.floor(tx)); ty = wrapY(Math.floor(ty));
+    const e = this.spawn(EntityKind.Structure, tx + 0.5, ty + 0.5);
+    this.world.add(e, Structure, { kind, owner, progress: 100, built: true, crop: CropStage.Empty, cropTimer: 0, seed: Item.Berries, watered: false });
+    this.occupant.set(tileIndex(tx, ty), e);
+    if (STRUCTURES[kind].blocks) this.setBlocked(tx, ty, true);
+    return e;
   }
 
   step(): void {
@@ -133,7 +190,8 @@ export class WorldSim {
     this.generated[ci] = 1;
     const data = this.surface.chunk(cx, cy);
     for (let j = 0; j < CHUNK_SIZE; j++) for (let i = 0; i < CHUNK_SIZE; i++) {
-      if (data.blocked[i + j * CHUNK_SIZE]) this.blocked[cx * CHUNK_SIZE + i + (cy * CHUNK_SIZE + j) * WORLD_W] = 1;
+      const idx = cx * CHUNK_SIZE + i + (cy * CHUNK_SIZE + j) * WORLD_W;
+      if (data.blocked[i + j * CHUNK_SIZE] && !this.cleared.has(idx)) this.blocked[idx] = 1;
     }
     for (const n of data.nodes) {
       const idx = tileIndex(n.x, n.y);
@@ -161,6 +219,8 @@ export class WorldSim {
       const c = this.viewCenter(player);
       if (c) want(c.x, c.y, AOI_RADIUS);
     }
+    // Villages live whether or not anyone is watching, so their land stays loaded.
+    for (const v of this.villages.villages) want(v.cx, v.cy + 5, 3);
     // Colonies keep working while their owner is away, so owned units hold their surroundings loaded.
     for (const u of this.world.query(Unit)) {
       if (this.world.get(u, Unit)!.owner === 0) continue;
@@ -209,7 +269,7 @@ export class WorldSim {
 
   // --- entity construction ----------------------------------------------------
 
-  private spawn(kind: EntityKind, x: number, y: number): Entity {
+  spawn(kind: EntityKind, x: number, y: number): Entity {
     const e = this.world.create();
     this.world.add(e, Position, { x, y });
     this.world.add(e, Net, { kind, version: 1, moveTick: this.tick });
@@ -217,12 +277,12 @@ export class WorldSim {
     return e;
   }
 
-  private bump(e: Entity): void {
+  bump(e: Entity): void {
     const n = this.world.get(e, Net);
     if (n) n.version++;
   }
 
-  private spawnUnit(x: number, y: number, owner: number, name: string, hero: boolean): Entity {
+  spawnUnit(x: number, y: number, owner: number, name: string, hero: boolean): Entity {
     const e = this.spawn(EntityKind.Unit, x, y);
     this.world.add(e, Unit, { owner, name, hp: 100, maxHp: 100, state: UnitState.Idle, facing: Math.PI / 2, hero, work: 0 });
     this.world.add(e, Inv, newInventory());
@@ -259,6 +319,8 @@ export class WorldSim {
     this.occupant.set(tileIndex(tx, ty), e);
     this.blocked[tileIndex(tx, ty)] = 1;
     this.pods.set(player, e);
+    // Every landing site has a settlement within a few minutes' walk, joined to it by a trail.
+    this.villages.ensureNear(tx + 0.5, ty + 0.5);
     return { x: tx + 0.5, y: ty + 0.5, fresh: true };
   }
 
@@ -292,7 +354,7 @@ export class WorldSim {
       const pos = this.world.get(e, Position)!;
       const door = this.pf.nearestFree(Math.floor(pos.x), Math.floor(pos.y) + 1, 4) ?? [Math.floor(pos.x), Math.floor(pos.y)];
       const hero = this.spawnUnit(door[0] + 0.5, door[1] + 0.5, pod.owner, this.names.get(pod.owner) ?? 'Colonist', true);
-      this.world.add(hero, Char, { player: pod.owner, vitals: newVitals(), skills: newSkills(), craft: null, inputs: [], ack: 0, moved: false, drinkAt: 0 });
+      this.world.add(hero, Char, { player: pod.owner, vitals: newVitals(), skills: newSkills(), craft: null, inputs: [], ack: 0, moved: false, drinkAt: 0, coins: 0 });
       const inv = this.world.get(hero, Inv)!;
       addItem(inv, Item.Shirt); addItem(inv, Item.Trousers); addItem(inv, Item.Berries, 6);
       for (const it of inv.items) if (ITEMS[it.def].slot !== undefined) moveItem(inv, it.uid, Cont.Equip, ITEMS[it.def].slot!, 0, 0);
@@ -340,6 +402,7 @@ export class WorldSim {
     return {
       ack: c.ack, x: p.x, y: p.y, hp: v.hp, satiety: v.satiety, hydration: v.hydration, stamina: v.stamina, temp: v.temp,
       status: v.status, ...this.load(u), work: this.world.get(u, Unit)!.work, ambient: this.surface.ambientC(p.x, p.y),
+      coins: c.coins, hour: this.hour,
     };
   }
 
@@ -383,6 +446,8 @@ export class WorldSim {
         case 'recipe': this.startRecipe(hero, cmd.recipe, cmd.station); break;
         case 'order': this.giveOrder(hero, cmd.npc, cmd.order); break;
         case 'drink': this.drink(hero, char); break;
+        case 'trade': { const err = this.villages.trade(hero, cmd.building, cmd.item, cmd.qty, cmd.sell); if (err) this.notify(hero, err); break; }
+        case 'contract': { const err = this.villages.contract(hero, cmd.building, cmd.id, cmd.deliver); this.notify(hero, err ?? (cmd.deliver ? 'Job done - paid in full' : 'Job accepted')); break; }
       }
     }
     this.queue.length = 0;
@@ -411,11 +476,21 @@ export class WorldSim {
     else if (st && !st.built) {
       if (st.owner === player) this.setJob(hero, JobKind.Build, target);
     } else if (st) this.setJob(hero, st.kind === StructureKind.GardenPlot ? JobKind.Tend : JobKind.Goto, target);
-    else if (unit && !unit.hero && unit.owner === 0) this.setJob(hero, JobKind.Recruit, target);
+    else if (this.world.has(target, Wolf)) this.setJob(hero, JobKind.Attack, target);
+    else if (this.world.has(target, Building)) {
+      // Walk to the doorstep; trading and the job board are separate, explicit commands.
+      const b = this.world.get(target, Building)!, front = layoutOf(b.type as BuildingType, b.flip).front;
+      this.clearWork(hero);
+      this.setPath(hero, b.ox + front[0] + 0.5, b.oy + front[1] + 0.5);
+    } else if (unit && !unit.hero && unit.owner === 0) this.setJob(hero, JobKind.Recruit, target);
   }
 
   private nearWater(p: { x: number; y: number }): boolean {
-    for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) if (this.surface.isWater(p.x + dx, p.y + dy)) return true;
+    for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+      if (this.surface.isWater(p.x + dx, p.y + dy)) return true;
+      const e = this.occupant.get(tileIndex(p.x + dx, p.y + dy));
+      if (e !== undefined && this.world.get(e, Structure)?.kind === StructureKind.Well) return true;
+    }
     return false;
   }
 
@@ -577,7 +652,7 @@ export class WorldSim {
   }
 
   /** Hand items to a unit, spilling what does not fit onto the ground. Returns true if anything spilled. */
-  private give(u: Entity, item: Item, qty: number, dur?: number): boolean {
+  give(u: Entity, item: Item, qty: number, dur?: number): boolean {
     const inv = this.world.get(u, Inv)!;
     const left = addItem(inv, item, qty, dur);
     const c = this.world.get(u, Char);
@@ -638,7 +713,7 @@ export class WorldSim {
     for (const c of def.cost) this.consume(hero, inv, c.item, c.qty, tx + 0.5, ty + 0.5);
     if (tool) this.wearTool(hero, inv, tool.uid, 2);
     const e = this.spawn(EntityKind.Structure, tx + 0.5, ty + 0.5);
-    this.world.add(e, Structure, { kind, owner: player, progress: 0, built: false, crop: CropStage.Empty, cropTimer: 0 });
+    this.world.add(e, Structure, { kind, owner: player, progress: 0, built: false, crop: CropStage.Empty, cropTimer: 0, seed: Item.Berries, watered: false });
     this.occupant.set(idx, e);
     if (!this.world.has(hero, Job)) this.setJob(hero, JobKind.Build, e);
   }
@@ -744,14 +819,15 @@ export class WorldSim {
         job.kind === JobKind.Harvest ? !!node
           : job.kind === JobKind.Build ? !!st && !st.built
             : job.kind === JobKind.Pickup ? this.world.has(job.target, Pile)
-              : job.kind === JobKind.Recruit ? this.world.get(job.target, Unit)?.owner === 0
-                : !!st && st.built);
+              : job.kind === JobKind.Recruit ? this.world.get(job.target, Unit)?.owner === 0 && !this.world.has(job.target, Wolf)
+                : job.kind === JobKind.Attack ? this.world.has(job.target, Wolf)
+                  : !!st && st.built);
       if (!tpos || !valid) { this.retarget(u, unit, pos, job); continue; }
 
       const tx = Math.floor(tpos.x), ty = Math.floor(tpos.y);
       const reach = Math.max(Math.abs(wrapDX(tx - Math.floor(pos.x))), Math.abs(wrapDY(ty - Math.floor(pos.y))));
       // Workers stand beside solid things, but may stand on a pile, a plot or a floor being laid.
-      const standOn = job.kind === JobKind.Pickup || job.kind === JobKind.Tend || job.kind === JobKind.Recruit
+      const standOn = job.kind === JobKind.Pickup || job.kind === JobKind.Tend || job.kind === JobKind.Recruit || job.kind === JobKind.Attack
         || (job.kind === JobKind.Build && !STRUCTURES[st!.kind].blocks);
       if (reach > 1 || (reach === 0 && !standOn)) {
         if (!this.approach(u, pos, tx, ty, standOn)) { this.notify(u, 'Cannot reach that'); this.endJob(u, unit); }
@@ -759,10 +835,25 @@ export class WorldSim {
       }
       const facing = reach === 0 ? unit.facing : Math.atan2(wrapDY(tpos.y - pos.y), wrapDX(tpos.x - pos.x));
       const state = job.kind === JobKind.Harvest || job.kind === JobKind.Tend ? UnitState.Harvesting
-        : job.kind === JobKind.Build ? UnitState.Building : job.kind === JobKind.Craft ? UnitState.Crafting : UnitState.Idle;
+        : job.kind === JobKind.Build ? UnitState.Building : job.kind === JobKind.Craft ? UnitState.Crafting
+          : job.kind === JobKind.Attack ? UnitState.Fighting : UnitState.Idle;
       if (unit.state !== state || Math.abs(unit.facing - facing) > 0.01) { unit.state = state; unit.facing = facing; this.bump(u); }
 
       switch (job.kind) {
+        case JobKind.Attack: {
+          job.timer += dt;
+          if (job.timer < 0.9) break;
+          job.timer = 0;
+          // A weapon in the pack does the work: spear, then axe, then knife, then bare fists.
+          const inv = this.world.get(u, Inv)!;
+          const weapon = bestTool(inv, 'spear') ?? bestTool(inv, 'axe') ?? bestTool(inv, 'knife');
+          const bonus = weapon ? (ITEMS[weapon.def].tool!.type === 'spear' ? 9 : ITEMS[weapon.def].tool!.type === 'axe' ? 5 : 3) : 0;
+          const damage = 4 + bonus + 2 * levelOf(this.world.get(u, Char)?.skills[Skill.Combat] ?? 0);
+          if (weapon) this.wearTool(u, inv, weapon.uid);
+          this.addXp(u, Skill.Combat, 4);
+          if (this.villages.hurtWolf(job.target, damage)) { this.notify(u, 'The wolf is dead'); this.endJob(u, unit); }
+          break;
+        }
         case JobKind.Harvest: this.workHarvest(u, unit, job, pos, dt); break;
         case JobKind.Build: {
           const step = Math.floor(st!.progress / 5);
@@ -803,12 +894,15 @@ export class WorldSim {
           const inv = this.world.get(u, Inv)!;
           if (st!.crop === CropStage.Ripe) {
             st!.crop = CropStage.Empty;
-            this.give(u, Item.Berries, 3 + Math.floor(levelOf(this.world.get(u, Char)?.skills[Skill.Farming] ?? 0) / 3));
+            st!.watered = false;
+            this.give(u, st!.seed, 3 + Math.floor(levelOf(this.world.get(u, Char)?.skills[Skill.Farming] ?? 0) / 3));
             this.addXp(u, Skill.Farming, 6);
           } else if (st!.crop === CropStage.Empty) {
-            if (removeItem(inv, Item.Berries, 1) === 0) this.notify(u, 'Need berries to plant');
+            // Grain if there is any to hand, berries otherwise; the plot yields what was sown.
+            const seed = countItem(inv, Item.Grain) > 0 ? Item.Grain : Item.Berries;
+            if (removeItem(inv, seed, 1) === 0) this.notify(u, 'Need grain or berries to plant');
             else {
-              st!.crop = CropStage.Sown; st!.cropTimer = 0;
+              st!.crop = CropStage.Sown; st!.cropTimer = 0; st!.seed = seed;
               this.crops.add(job.target);
               this.addXp(u, Skill.Farming, 3);
               const c = this.world.get(u, Char);
@@ -955,7 +1049,7 @@ export class WorldSim {
     }
   }
 
-  private setPath(u: Entity, x: number, y: number): boolean {
+  setPath(u: Entity, x: number, y: number): boolean {
     const pos = this.world.get(u, Position)!;
     if (wrapDist(pos.x, pos.y, x, y) > MAX_PATH_RANGE) return false;
     const pts = this.pf.findPath(pos.x, pos.y, wrapX(x), wrapY(y));
@@ -966,20 +1060,20 @@ export class WorldSim {
     return true;
   }
 
-  private stop(u: Entity, unit: UnitData): void {
+  stop(u: Entity, unit: UnitData): void {
     this.world.remove(u, Path);
     unit.state = UnitState.Idle;
     this.bump(u);
   }
 
-  private endJob(u: Entity, unit: UnitData): void {
+  endJob(u: Entity, unit: UnitData): void {
     this.world.remove(u, Job);
     unit.work = 0;
     this.stop(u, unit);
   }
 
   /** Walk to the closest free tile beside (or, when allowed, on) a target tile. */
-  private approach(u: Entity, pos: { x: number; y: number }, tx: number, ty: number, allowOn: boolean): boolean {
+  approach(u: Entity, pos: { x: number; y: number }, tx: number, ty: number, allowOn: boolean): boolean {
     const options: [number, number, number][] = [];
     for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
       if (dx === 0 && dy === 0 && !allowOn) continue;
@@ -993,7 +1087,7 @@ export class WorldSim {
   }
 
   /** Closest accepted entity within `radius` of (x, y), measured from (fromX, fromY) when given. */
-  private nearest(x: number, y: number, radius: number, accept: (e: Entity) => boolean, fromX = x, fromY = y): Entity | undefined {
+  nearest(x: number, y: number, radius: number, accept: (e: Entity) => boolean, fromX = x, fromY = y): Entity | undefined {
     let best: Entity | undefined, bestD = Infinity;
     this.grid.forEachNear(x, y, radius, (e) => {
       const p = this.world.get(e, Position);
@@ -1010,7 +1104,7 @@ export class WorldSim {
     for (const e of this.crops) {
       const s = this.world.get(e, Structure);
       if (!s || s.crop === CropStage.Empty || s.crop === CropStage.Ripe) { this.crops.delete(e); continue; }
-      s.cropTimer += dt;
+      s.cropTimer += dt * (s.watered ? 2 : 1);
       const stage = s.cropTimer >= CROP_RIPE ? CropStage.Ripe : s.cropTimer >= CROP_SPROUT ? CropStage.Sprout : CropStage.Sown;
       if (stage !== s.crop) { s.crop = stage; this.bump(e); }
     }

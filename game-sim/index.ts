@@ -4,5 +4,7 @@ export * from './inventory';
 export * from './character';
 export * from './movement';
 export * from './pathfinding';
+export * from './village';
+export * from './villageSim';
 export * from './worldSim';
 export * from './view';

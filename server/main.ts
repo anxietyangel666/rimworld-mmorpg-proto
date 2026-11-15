@@ -112,6 +112,14 @@ function handle(p: Player, m: ClientMsg): void {
     case C2S.Recipe: sim.enqueue({ type: 'recipe', player, recipe: m.recipe, station: m.station }); break;
     case C2S.Order: sim.enqueue({ type: 'order', player, npc: m.npc, order: m.order }); break;
     case C2S.Drink: sim.enqueue({ type: 'drink', player }); break;
+    case C2S.Trade: sim.enqueue({ type: 'trade', player, building: m.building, item: m.item, qty: m.qty, sell: m.sell }); break;
+    case C2S.Contract: sim.enqueue({ type: 'contract', player, building: m.building, id: m.id, deliver: m.deliver }); break;
+    case C2S.VillageInfo: {
+      // A read-only query, answered straight away rather than queued behind the tick.
+      const info = sim.villages.info(player, m.building);
+      if (info) send(p, { op: S2C.Village, info });
+      break;
+    }
   }
 }
 
@@ -200,7 +208,9 @@ const http = createServer((req, res) => {
   createReadStream(file).pipe(res);
 });
 
-const wss = new WebSocketServer({ server: http, path: '/ws', maxPayload: 2048 });
+// Snapshots near a village carry many records: compress the big ones, leave small packets alone.
+const wss = new WebSocketServer({ server: http, path: '/ws', maxPayload: 2048, perMessageDeflate: { threshold: 512 } });
+
 
 wss.on('connection', (ws) => {
   let player: Player | null = null;

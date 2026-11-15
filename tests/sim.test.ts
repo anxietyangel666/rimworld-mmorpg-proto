@@ -218,7 +218,7 @@ describe('protocol', () => {
     const snap = {
       op: S2C.Snapshot as const, tick: 1234,
       full: [
-        { id: 9, kind: EntityKind.Unit, x: 1000.5, y: 500.25, unit: { owner: 2, name: 'Yuu', hp: 90, maxHp: 100, state: 1, facing: Math.PI / 2, hero: true, order: Order.Wood, path: [5.5, 6.5, 1020.5, 9.5] } },
+        { id: 9, kind: EntityKind.Unit, x: 1000.5, y: 500.25, unit: { owner: 2, name: 'Yuu', hp: 90, maxHp: 100, state: 1, facing: Math.PI / 2, hero: true, order: Order.Wood, prof: 0, path: [5.5, 6.5, 1020.5, 9.5] } },
         { id: 10, kind: EntityKind.Node, x: 1.5, y: 2.5, node: { kind: NodeKind.Ore, amount: 6 } },
         { id: 11, kind: EntityKind.Structure, x: 3.5, y: 3.5, structure: { kind: StructureKind.GardenPlot, owner: 2, progress: 40, built: true, crop: 3 } },
         { id: 12, kind: EntityKind.Pod, x: 7.5, y: 7.5, pod: { owner: 2, spawnTick: 1200, deployed: true } },
@@ -237,7 +237,7 @@ describe('protocol', () => {
 
   it('interpolates across the world seam the short way', () => {
     const m = new EntityMirror(20, 2, WORLD_W, WORLD_H);
-    const unit = { owner: 1, name: 'a', hp: 1, maxHp: 1, state: 1, facing: 0, hero: true, order: 0, path: [] };
+    const unit = { owner: 1, name: 'a', hp: 1, maxHp: 1, state: 1, facing: 0, hero: true, order: 0, prof: 0, path: [] };
     m.apply({ tick: 100, full: [{ id: 1, kind: EntityKind.Unit, x: WORLD_W - 0.25, y: 5, unit }], moves: [], gone: [] }, 0);
     m.apply({ tick: 102, full: [], moves: [{ id: 1, x: 0.25, y: 5, facing: 0 }], gone: [] }, 100);
     m.update(200, 0.016);
@@ -424,8 +424,9 @@ describe('world simulation', () => {
     sim.dropPile(Item.Log, 1, 0, pos.x - 1, pos.y);
     const tx = Math.floor(pos.x) + 2, ty = Math.floor(pos.y) + 1;
     sim.enqueue({ type: 'build', player: 1, kind: StructureKind.ChoppingBlock, tx, ty });
-    run(sim, 20, () => sim.world.query(Structure).some((e) => sim.world.get(e, Structure)!.built));
-    const block = sim.world.query(Structure)[0];
+    const mine = () => sim.world.query(Structure).filter((e) => sim.world.get(e, Structure)!.owner === 1);
+    run(sim, 20, () => mine().some((e) => sim.world.get(e, Structure)!.built));
+    const block = mine()[0];
     expect(sim.world.get(block, Structure)).toMatchObject({ kind: StructureKind.ChoppingBlock, built: true });
     expect(sim.blockedAt(tx, ty)).toBe(true);
     sim.enqueue({ type: 'recipe', player: 1, recipe: split, station: block });

@@ -19,16 +19,19 @@ export const BUILD_RATE = 22;
 export const RECRUIT_BERRIES = 3;
 /** Radius around a site or station within which materials lying on the ground count as available. */
 export const SITE_RADIUS = 4;
-/** Seconds for a planted crop to sprout, then to ripen. */
+/** Seconds for a planted crop to sprout, then to ripen. Watered crops grow twice as fast. */
 export const CROP_SPROUT = 40;
 export const CROP_RIPE = 90;
+/** One day and night lasts ten minutes; the world starts at seven in the morning. */
+export const DAY_TICKS = 12000;
+export const DAY_START_HOUR = 7;
 
-export enum EntityKind { Unit = 1, Node = 2, Structure = 3, Pod = 4, Pile = 5 }
-export enum UnitState { Idle, Moving, Harvesting, Building, Crafting }
+export enum EntityKind { Unit = 1, Node = 2, Structure = 3, Pod = 4, Pile = 5, Road = 6, Building = 7 }
+export enum UnitState { Idle, Moving, Harvesting, Building, Crafting, Sleeping, Eating, Fighting }
 /** Standing orders a recruited follower carries out on their own. */
 export enum Order { Follow, Stay, Wood, Stone, Forage, Build }
 export const ORDER_NAMES = ['Follow me', 'Stay here', 'Fell timber', 'Quarry stone', 'Forage & farm', 'Build'];
-export enum JobKind { Harvest, Build, Pickup, Craft, Recruit, Tend, Goto }
+export enum JobKind { Harvest, Build, Pickup, Craft, Recruit, Tend, Goto, Attack }
 export enum CropStage { Empty, Sown, Sprout, Ripe }
 
 export interface PositionData { x: number; y: number }
@@ -40,7 +43,7 @@ export interface NetData {
   moveTick: number;
 }
 export interface UnitData {
-  /** Owning player, or 0 for an unaligned drifter. */
+  /** Owning player, a village's owner id, or 0 for the unaligned (drifters, wildlife). */
   owner: number;
   name: string;
   hp: number;
@@ -87,11 +90,56 @@ export interface CharData {
   ack: number;
   moved: boolean;
   drinkAt: number;
+  /** Copper coins in the purse. */
+  coins: number;
 }
 export interface NodeData { kind: NodeKind; amount: number }
-export interface StructureData { kind: StructureKind; owner: number; progress: number; built: boolean; crop: CropStage; cropTimer: number }
+export interface StructureData {
+  kind: StructureKind; owner: number; progress: number; built: boolean;
+  crop: CropStage; cropTimer: number;
+  /** Garden plots: what was sown, and whether it has been watered since. */
+  seed: Item; watered: boolean;
+}
 export interface PodData { owner: number; spawnTick: number; deployed: boolean; sector: number }
 export interface PileData { item: Item; qty: number; dur: number }
+/** A stretch of road or trail: a polyline of tile-space points. */
+export interface RoadData { wide: boolean; pts: number[] }
+/** A village building. Its tiles, doors and furniture come from the layout for (type, flip). */
+export interface BuildingData {
+  type: number; flip: boolean; village: number;
+  /** 0..100; walls only become solid once it reaches 100. */
+  progress: number; built: boolean;
+  /** Top-left tile of the footprint. */
+  ox: number; oy: number;
+}
+
+/** A timed errand: walk to a place, spend some seconds there, then apply the result. */
+export interface VillagerTask {
+  x: number; y: number;
+  /** How close counts as arrived; larger when the goal itself is a solid object. */
+  reach: number;
+  seconds: number; t: number; tries: number;
+  state: UnitState;
+  /** Plot, node or site this errand is about, so two villagers do not pick the same one. */
+  ref: Entity;
+  done: (() => void) | null;
+}
+export interface VillagerData {
+  village: number;
+  /** Prof enum from village.ts. */
+  prof: number;
+  home: Entity; work: Entity;
+  /** Where they sleep and where they stand to work, in world tiles. */
+  bed: [number, number]; post: [number, number];
+  coins: number;
+  /** Needs, each 0 (desperate) .. 100 (content). */
+  satiety: number; rest: number; warmth: number;
+  task: VillagerTask | null;
+  /** Carrying a bucket of water for the crops. */
+  water: boolean;
+  patrol: number;
+}
+export interface WolfData { village: number; cool: number }
 
 export const Position = defineComponent<PositionData>('Position');
 export const Net = defineComponent<NetData>('Net');
@@ -105,3 +153,7 @@ export const Node = defineComponent<NodeData>('Node');
 export const Structure = defineComponent<StructureData>('Structure');
 export const Pod = defineComponent<PodData>('Pod');
 export const Pile = defineComponent<PileData>('Pile');
+export const Road = defineComponent<RoadData>('Road');
+export const Building = defineComponent<BuildingData>('Building');
+export const Villager = defineComponent<VillagerData>('Villager');
+export const Wolf = defineComponent<WolfData>('Wolf');

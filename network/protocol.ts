@@ -3,6 +3,7 @@ import type { CraftSession } from '../game-sim/components';
 import type { ItemInst } from '../game-sim/inventory';
 import { PATTERN_SIZE, SKILL_COUNT, type StructureKind } from '../game-sim/items';
 import type { EntityState } from '../game-sim/view';
+import type { VillageInfo } from '../game-sim/villageSim';
 import type { SelfState } from '../game-sim/worldSim';
 import { ByteReader, ByteWriter } from './bytes';
 
@@ -14,9 +15,9 @@ import { ByteReader, ByteWriter } from './bytes';
 
 export enum C2S {
   Hello = 1, Land, Leave, Input, MoveTo, Interact, Build, InvMove, InvDrop, InvUse,
-  CraftStart, CraftHit, CraftCancel, Recipe, Order, Drink, Ping,
+  CraftStart, CraftHit, CraftCancel, Recipe, Order, Drink, Ping, Trade, Contract, VillageInfo,
 }
-export enum S2C { Welcome = 64, SectorStats, Landed, Snapshot, Self, Inventory, Skills, Craft, Pong, Notice, Roster }
+export enum S2C { Welcome = 64, SectorStats, Landed, Snapshot, Self, Inventory, Skills, Craft, Pong, Notice, Roster, Village }
 
 export type ClientMsg =
   | { op: C2S.Hello; token: string; name: string }
@@ -37,7 +38,12 @@ export type ClientMsg =
   | { op: C2S.Recipe; recipe: number; station: number }
   | { op: C2S.Order; npc: number; order: Order }
   | { op: C2S.Drink }
-  | { op: C2S.Ping; t: number };
+  | { op: C2S.Ping; t: number }
+  /** Buy from (sell false) or sell to (sell true) the market that `building` is. */
+  | { op: C2S.Trade; building: number; item: number; qty: number; sell: boolean }
+  | { op: C2S.Contract; building: number; id: number; deliver: boolean }
+  /** Ask for the market or town hall sheet of a building. */
+  | { op: C2S.VillageInfo; building: number };
 
 export interface MoveUpdate { id: number; x: number; y: number; facing: number }
 
@@ -52,7 +58,8 @@ export type ServerMsg =
   | { op: S2C.Craft; session: CraftSession | null }
   | { op: S2C.Pong; t: number }
   | { op: S2C.Notice; text: string }
-  | { op: S2C.Roster; players: { id: number; name: string }[] };
+  | { op: S2C.Roster; players: { id: number; name: string }[] }
+  | { op: S2C.Village; info: VillageInfo };
 
 const TAU = Math.PI * 2;
 const POS_SCALE = 64;
@@ -61,6 +68,7 @@ const qPos = (v: number) => Math.min(65535, Math.max(0, Math.round(v * POS_SCALE
 const qAngle = (a: number) => Math.round((((a % TAU) + TAU) % TAU) / TAU * 256) & 255;
 const dAngle = (b: number) => (b / 256) * TAU;
 const q8 = (v: number) => Math.min(255, Math.max(0, Math.round(v)));
+const q16 = (v: number) => Math.min(65535, Math.max(0, Math.round(v)));
 
 export function encodeClient(m: ClientMsg): Uint8Array<ArrayBuffer> {
   const w = new ByteWriter(32).u8(m.op);
@@ -78,6 +86,9 @@ export function encodeClient(m: ClientMsg): Uint8Array<ArrayBuffer> {
     case C2S.Recipe: w.u8(m.recipe).u32(m.station); break;
     case C2S.Order: w.u32(m.npc).u8(m.order); break;
     case C2S.Ping: w.f64(m.t); break;
+    case C2S.Trade: w.u32(m.building).u8(m.item).u8(m.qty).u8(m.sell ? 1 : 0); break;
+    case C2S.Contract: w.u32(m.building).u8(m.id).u8(m.deliver ? 1 : 0); break;
+    case C2S.VillageInfo: w.u32(m.building); break;
     case C2S.Leave: case C2S.CraftCancel: case C2S.Drink: break;
   }
   return w.finish();
@@ -100,6 +111,9 @@ export function decodeClient(data: Uint8Array): ClientMsg {
     case C2S.Recipe: return { op, recipe: r.u8(), station: r.u32() };
     case C2S.Order: return { op, npc: r.u32(), order: r.u8() };
     case C2S.Ping: return { op, t: r.f64() };
+    case C2S.Trade: return { op, building: r.u32(), item: r.u8(), qty: r.u8(), sell: r.u8() === 1 };
+    case C2S.Contract: return { op, building: r.u32(), id: r.u8(), deliver: r.u8() === 1 };
+    case C2S.VillageInfo: return { op, building: r.u32() };
     case C2S.Leave: case C2S.CraftCancel: case C2S.Drink: return { op };
     default: throw new RangeError('unknown client opcode ' + op);
   }
@@ -110,22 +124,27 @@ export function writeEntityFull(w: ByteWriter, s: EntityState): void {
   if (s.unit) {
     const u = s.unit;
     const n = Math.min(255, u.path.length >> 1);
-    w.u16(u.owner).u8(q8(u.hp)).u8(u.maxHp).u8(u.state).u8(qAngle(u.facing)).u8((u.hero ? 1 : 0) | (u.order << 1)).str(u.name).u8(n);
+    w.u16(u.owner).u8(q8(u.hp)).u8(u.maxHp).u8(u.state).u8(qAngle(u.facing)).u8((u.hero ? 1 : 0) | (u.order << 1)).u8(u.prof).str(u.name).u8(n);
     for (let i = 0; i < n * 2; i++) w.u16(qPos(u.path[i]));
   } else if (s.node) w.u8(s.node.kind).u8(s.node.amount);
   else if (s.structure) w.u8(s.structure.kind).u16(s.structure.owner).u8(s.structure.progress).u8((s.structure.built ? 1 : 0) | (s.structure.crop << 1));
   else if (s.pod) w.u16(s.pod.owner).u32(s.pod.spawnTick).u8(s.pod.deployed ? 1 : 0);
   else if (s.pile) w.u8(s.pile.item).u8(q8(s.pile.qty));
+  else if (s.road) {
+    const n = Math.min(255, s.road.pts.length >> 1);
+    w.u8(s.road.wide ? 1 : 0).u8(n);
+    for (let i = 0; i < n * 2; i++) w.u16(qPos(s.road.pts[i]));
+  } else if (s.building) w.u8(s.building.type).u8((s.building.flip ? 1 : 0) | (s.building.built ? 2 : 0)).u8(s.building.progress).u16(s.building.village);
 }
 
 function readEntityFull(r: ByteReader): EntityState {
   const s: EntityState = { id: r.u32(), kind: r.u8(), x: r.u16() / POS_SCALE, y: r.u16() / POS_SCALE };
   switch (s.kind) {
     case EntityKind.Unit: {
-      const owner = r.u16(), hp = r.u8(), maxHp = r.u8(), state = r.u8(), facing = dAngle(r.u8()), flags = r.u8(), name = r.str();
+      const owner = r.u16(), hp = r.u8(), maxHp = r.u8(), state = r.u8(), facing = dAngle(r.u8()), flags = r.u8(), prof = r.u8(), name = r.str();
       const path: number[] = [];
       for (let i = 0, n = r.u8() * 2; i < n; i++) path.push(r.u16() / POS_SCALE);
-      s.unit = { owner, hp, maxHp, state, facing, hero: (flags & 1) === 1, order: flags >> 1, name, path };
+      s.unit = { owner, hp, maxHp, state, facing, hero: (flags & 1) === 1, order: flags >> 1, prof, name, path };
       break;
     }
     case EntityKind.Node: s.node = { kind: r.u8(), amount: r.u8() }; break;
@@ -136,6 +155,17 @@ function readEntityFull(r: ByteReader): EntityState {
     }
     case EntityKind.Pod: s.pod = { owner: r.u16(), spawnTick: r.u32(), deployed: r.u8() === 1 }; break;
     case EntityKind.Pile: s.pile = { item: r.u8(), qty: r.u8() }; break;
+    case EntityKind.Road: {
+      const wide = r.u8() === 1, pts: number[] = [];
+      for (let i = 0, n = r.u8() * 2; i < n; i++) pts.push(r.u16() / POS_SCALE);
+      s.road = { wide, pts };
+      break;
+    }
+    case EntityKind.Building: {
+      const type = r.u8(), flags = r.u8(), progress = r.u8(), village = r.u16();
+      s.building = { type, flip: (flags & 1) === 1, built: (flags & 2) === 2, progress, village };
+      break;
+    }
     default: throw new RangeError('unknown entity kind ' + s.kind);
   }
   return s;
@@ -167,7 +197,7 @@ export function encodeServer(m: ServerMsg): Uint8Array<ArrayBuffer> {
       // Own position is sent at full precision: the client replays predicted inputs on top of it.
       w.u32(s.ack).f32(s.x).f32(s.y).u8(q8(s.hp)).u8(q8(s.satiety)).u8(q8(s.hydration)).u8(q8(s.stamina))
         .u16(Math.round(s.temp * 10)).u16(s.status).u16(Math.round(s.kg * 10)).u16(Math.round(s.capacity * 10))
-        .u8(s.tier).u8(q8(s.work)).i8(Math.max(-127, Math.min(127, Math.round(s.ambient))));
+        .u8(s.tier).u8(q8(s.work)).i8(Math.max(-127, Math.min(127, Math.round(s.ambient)))).u16(q16(s.coins)).u8(q8((s.hour / 24) * 240));
       break;
     }
     case S2C.Inventory:
@@ -188,6 +218,17 @@ export function encodeServer(m: ServerMsg): Uint8Array<ArrayBuffer> {
       w.u8(m.players.length);
       for (const p of m.players) w.u16(p.id).str(p.name);
       break;
+    case S2C.Village: {
+      const v = m.info;
+      w.u32(v.building).u8(v.type).str(v.name).u32(v.treasury).u16(v.population).u16(q16(v.reputation)).u16(q16(v.coins))
+        .u8(v.open ? 1 : 0).u8(v.site).u8(v.siteProgress).u8(v.stock.length);
+      for (const s of v.stock) w.u8(s.item).u16(q16(s.qty)).u16(q16(s.buy)).u16(q16(s.sell));
+      w.u8(v.contracts.length);
+      for (const c of v.contracts) w.u8(c.id).u8(c.item).u8(c.qty).u16(q16(c.reward)).u8(c.state);
+      w.u8(v.ledger.length);
+      for (const line of v.ledger) w.str(line);
+      break;
+    }
   }
   return w.finish();
 }
@@ -216,6 +257,7 @@ export function decodeServer(data: Uint8Array): ServerMsg {
         op, self: {
           ack: r.u32(), x: r.f32(), y: r.f32(), hp: r.u8(), satiety: r.u8(), hydration: r.u8(), stamina: r.u8(),
           temp: r.u16() / 10, status: r.u16(), kg: r.u16() / 10, capacity: r.u16() / 10, tier: r.u8(), work: r.u8(), ambient: r.i8(),
+          coins: r.u16(), hour: (r.u8() / 240) * 24,
         },
       };
     case S2C.Inventory: {
@@ -240,6 +282,15 @@ export function decodeServer(data: Uint8Array): ServerMsg {
       const players = [];
       for (let i = 0, n = r.u8(); i < n; i++) players.push({ id: r.u16(), name: r.str() });
       return { op, players };
+    }
+    case S2C.Village: {
+      const building = r.u32(), type = r.u8(), name = r.str(), treasury = r.u32(), population = r.u16(), reputation = r.u16(), coins = r.u16();
+      const open = r.u8() === 1, site = r.u8(), siteProgress = r.u8();
+      const stock = [], contracts = [], ledger: string[] = [];
+      for (let i = 0, n = r.u8(); i < n; i++) stock.push({ item: r.u8(), qty: r.u16(), buy: r.u16(), sell: r.u16() });
+      for (let i = 0, n = r.u8(); i < n; i++) contracts.push({ id: r.u8(), item: r.u8(), qty: r.u8(), reward: r.u16(), state: r.u8() });
+      for (let i = 0, n = r.u8(); i < n; i++) ledger.push(r.str());
+      return { op, info: { building, type, name, treasury, population, reputation, coins, open, site, siteProgress, stock, contracts, ledger } };
     }
     default: throw new RangeError('unknown server opcode ' + op);
   }
