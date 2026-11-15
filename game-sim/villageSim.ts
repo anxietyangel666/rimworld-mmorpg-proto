@@ -619,7 +619,7 @@ export class VillageSystem {
       this.note(v, 'Marked out a new ' + BUILDINGS[type].name.toLowerCase());
       return;
     }
-    v.grown++;
+  }
 
   /** One spell of work on the building site: uses up the materials that stretch needs and pays the builder. */
   private buildStep(v: Village, site: Entity, vd: VillagerData): void {
