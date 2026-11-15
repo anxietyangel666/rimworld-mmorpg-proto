@@ -40,10 +40,13 @@ export interface Village {
   /** Materials already used on the current site. */
   spent: Map<Item, number>;
   grown: number;
-  /** East ends of the two building rows and of the main road, where new buildings go. */
+  /** Ends of the two building rows and of the main road, east and west, where new buildings go. */
   rowN: number;
   rowS: number;
   roadE: number;
+  westN: number;
+  westS: number;
+  roadW: number;
   /** Where newcomers arrive from. */
   gate: [number, number];
   patrol: [number, number][];
@@ -137,7 +140,7 @@ export class VillageSystem {
       id, name: VILLAGE_NAMES[(id - 1) % VILLAGE_NAMES.length], cx, cy, owner: VILLAGE_OWNER + id,
       treasury: 600, till: 800, stock: new Map(), buildings: [], villagers: [], plots: [], well: [cx - 1, cy + 15],
       reputation: new Map(), contracts: [], nextContract: 1, site: 0, spent: new Map(), grown: 0,
-      rowN: 0, rowS: 0, roadE: cx + 31, gate: [cx - 40, cy + 1], patrol: [], ledger: [], lastHour: Math.floor(sim.hour),
+      rowN: 0, rowS: 0, roadE: cx + 31, westN: cx - 26, westS: cx - 29, roadW: cx - 31, gate: [cx - 40, cy + 1], patrol: [], ledger: [], lastHour: Math.floor(sim.hour),
     };
     this.villages.push(v);
     for (const [item, qty] of [
@@ -594,24 +597,29 @@ export class VillageSystem {
     const type = GROWTH_PLAN[v.grown % GROWTH_PLAN.length], cost = BUILDINGS[type].cost;
     if (v.treasury < cost.coins + 150) return;
     if (!cost.items.every(([item, qty]) => this.stockOf(v, item) >= qty)) return;
-    const north = v.grown % 2 === 0, L = layoutOf(type, !north);
-    const oy = north ? v.cy - 1 - L.h : v.cy + 3;
-    let ox = north ? v.rowN : v.rowS;
-    for (let shift = 0; shift < 10 && !this.siteFree(ox, oy, L.w, L.h); shift++) ox += 2;
-    if (!this.siteFree(ox, oy, L.w, L.h)) return;
-    // Extend the street past the new plot so it has a road to stand on.
-    if (ox + L.w + 2 > v.roadE) {
-      const to = ox + L.w + 3;
-      for (let x = v.roadE; x <= to; x++) { this.sim.clearTile(x, v.cy); this.sim.clearTile(x, v.cy + 1); }
-      this.addRoad([v.roadE, v.cy + 1, to + 0.99, v.cy + 1], true);
-      v.roadE = to + 1;
+    // Build along the street: the planned side first, then the other, off the east end and then the west.
+    const pref = v.grown % 2 === 0;
+    for (const [north, east] of [[pref, true], [!pref, true], [pref, false], [!pref, false]]) {
+      const L = layoutOf(type, !north), oy = north ? v.cy - 1 - L.h : v.cy + 3;
+      let ox = east ? (north ? v.rowN : v.rowS) : (north ? v.westN : v.westS) - L.w;
+      for (let shift = 0; shift < 8 && !this.siteFree(ox, oy, L.w, L.h); shift++) ox += east ? 2 : -2;
+      if (!this.siteFree(ox, oy, L.w, L.h)) continue;
+      // Extend the street past the new plot so it has a road to stand on.
+      const from = east ? v.roadE : ox - 3, to = east ? ox + L.w + 3 : v.roadW;
+      if (from < to && (east ? to > v.roadE : from < v.roadW)) {
+        for (let x = from; x <= to; x++) { this.sim.clearTile(x, v.cy); this.sim.clearTile(x, v.cy + 1); }
+        this.addRoad([from, v.cy + 1, to + 0.99, v.cy + 1], true);
+        if (east) v.roadE = to + 1; else v.roadW = from;
+      }
+      v.site = this.addBuilding(v, type, ox, oy, !north, false);
+      v.spent = new Map();
+      if (east) { if (north) v.rowN = ox + L.w + 2; else v.rowS = ox + L.w + 2; }
+      else if (north) v.westN = ox - 2; else v.westS = ox - 2;
+      v.grown++;
+      this.note(v, 'Marked out a new ' + BUILDINGS[type].name.toLowerCase());
+      return;
     }
-    v.site = this.addBuilding(v, type, ox, oy, !north, false);
-    v.spent = new Map();
-    if (north) v.rowN = ox + L.w + 2; else v.rowS = ox + L.w + 2;
     v.grown++;
-    this.note(v, 'Marked out a new ' + BUILDINGS[type].name.toLowerCase());
-  }
 
   /** One spell of work on the building site: uses up the materials that stretch needs and pays the builder. */
   private buildStep(v: Village, site: Entity, vd: VillagerData): void {
